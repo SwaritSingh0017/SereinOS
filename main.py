@@ -1,65 +1,83 @@
-from src.database.database import Database
+import time
+import sys
+from src.serein_compat import SereinOS
+from src.ui.ui_engine import ConsoleUI
 
+print("\n" + "="*50)
+print("SereinOS")
+print("="*50)
 
-def extract_name(text):
+# Initialize SereinOS
+serein = SereinOS()
+serein.initialize()
 
-    text = text.strip()
+# Check if using console backend (to avoid double-print)
+_using_console_backend = isinstance(serein.ui._backend, ConsoleUI) if serein.ui and serein.ui._backend else False
 
-    prefixes = [
-        "my name is",
-        "i am",
-        "i'm"
-    ]
+# Set up UI input callback
+def on_ui_input(user_input: str):
+    """Handle input from UI."""
+    if user_input.lower() in ["exit", "quit", "bye"]:
+        print("\nSerein: Goodbye for now. I'll be here when you need me.")
+        serein.shutdown()
+        if serein.ui:
+            serein.ui.shutdown()
+        sys.exit(0)
+    
+    if not user_input:
+        return
+    
+    start = time.time()
+    response = serein.process_input(user_input)
+    end = time.time()
+    
+    # Send response to UI
+    if serein.ui:
+        serein.ui.append_message("serein", response['content'])
+    
+    # Only print to console if NOT using ConsoleUI backend (to avoid double-print)
+    if not _using_console_backend:
+        print(f"\nSerein: {response['content']}")
+        print(f"\n[Response Time: {end - start:.2f}s | Action: {response.get('action', 'respond')} | Provider: {response.get('provider', 'unknown')}]")
 
-    lower_text = text.lower()
-
-    for prefix in prefixes:
-
-        if lower_text.startswith(prefix):
-
-            return text[len(prefix):].strip()
-
-    return text
-
-
-db = Database()
-
-identity = db.get_identity()
-
-print("\nSereinOS\n")
-
-if identity is None:
-
-    print("Serein: Hello.")
-    print("Serein: I'm Serein.")
-    print("Serein: I think this is our first time meeting.")
-
-    user_input = input(
-        "Serein: May I know your name?\n> "
-    )
-
-    user_name = extract_name(user_input)
-
-    db.create_identity(user_name)
-
-    db.save_memory(
-        content=f"User's name is {user_name}",
-        tags="identity,name",
-        importance=100,
-        emotion="neutral",
-        source="text"
-    )
-
-    print(f"\nSerein: It's nice to meet you, {user_name}.")
-
+# Connect UI to input handler
+if serein.ui:
+    serein.ui.on_input(on_ui_input)
+    
+    # Boot sequence
+    greeting = serein.get_greeting()
+    serein.ui.boot(greeting)
+    serein.ui.start_conversation()
+    serein.ui.show()
+    
+    # Run UI event loop (blocking)
+    serein.ui.run()
 else:
+    # Fallback to console mode
+    print(f"\nSerein: {serein.get_greeting()}\n")
+    
+    while True:
+        try:
+            user_input = input("You: ").strip()
+            
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                print(f"\nSerein: Goodbye for now. I'll be here when you need me.")
+                break
+            
+            if not user_input:
+                continue
+            
+            start = time.time()
+            response = serein.process_input(user_input)
+            end = time.time()
+            
+            print(f"\nSerein: {response['content']}")
+            print(f"\n[Response Time: {end - start:.2f}s | Action: {response.get('action', 'respond')} | Provider: {response.get('provider', 'unknown')}]")
+            
+        except KeyboardInterrupt:
+            print("\n\nSerein: Interrupted. Shutting down...")
+            break
+        except Exception as e:
+            print(f"\n[Error: {e}]")
 
-    display_name = db.get_display_name()
-
-    db.update_last_seen()
-
-    print(
-        f"Serein: Welcome back, {display_name}."
-    )
-
-db.close()
+serein.shutdown()

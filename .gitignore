@@ -1,5 +1,49 @@
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 *.db
+*.sqlite3
+*.sqlcipher
 .vscode/
-.env
+.idea/
+.env*
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+*.token
+credentials.json
+secrets.yaml
+secrets.json
+
+# Python tooling
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# OS disk images & ISO builds (Never commit ISOs)
+*.iso
+*.sha256
+*.img
+*.squashfs
+*.vmdk
+
+# Internal agent runtime logs
+.agents/
+.court/
+
+# Local model weights
+*.gguf
+*.bin
+*.onnx
+
+# Node / Bundler
+node_modules/

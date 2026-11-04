@@ -1,0 +1,129 @@
+# --------------------------------------------------------------------------
+# SereinOS Glowing Neon Plymouth Boot Splash Script (serein-glow.script)
+# Cyberpunk aesthetic with sinusoidal breathing glow bloom and neon progress bar.
+# --------------------------------------------------------------------------
+
+# Screen Dimensions
+screen.width = Window.GetWidth();
+screen.height = Window.GetHeight();
+
+# Background
+Window.SetBackgroundTopColor(0.04, 0.05, 0.09);
+Window.SetBackgroundBottomColor(0.02, 0.03, 0.06);
+
+# Center Positions
+center.x = screen.width / 2;
+center.y = screen.height / 2;
+
+# Load Logo Asset
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.width = logo.image.GetWidth();
+logo.height = logo.image.GetHeight();
+logo.x = center.x - (logo.width / 2);
+logo.y = center.y - (logo.height / 2) - 40;
+logo.sprite.SetPosition(logo.x, logo.y, 10);
+logo.sprite.SetOpacity(1.0);
+
+# Load Radial Glow Bloom Layer
+glow.image = Image("glow.png");
+if (glow.image) {
+    glow.sprite = Sprite(glow.image);
+    glow.width = glow.image.GetWidth();
+    glow.height = glow.image.GetHeight();
+    glow.x = center.x - (glow.width / 2);
+    glow.y = logo.y + (logo.height / 2) - (glow.height / 2);
+    glow.sprite.SetPosition(glow.x, glow.y, 5);
+    glow.sprite.SetOpacity(0.5);
+}
+
+# Progress Bar Setup
+progress_bar.width = 320;
+progress_bar.height = 6;
+progress_bar.x = center.x - (progress_bar.width / 2);
+progress_bar.y = center.y + 70;
+
+# Progress Bar Background Frame
+bar_bg.image = Image.CreateColor(progress_bar.width, progress_bar.height, 0.1, 0.12, 0.18, 0.8);
+bar_bg.sprite = Sprite(bar_bg.image);
+bar_bg.sprite.SetPosition(progress_bar.x, progress_bar.y, 8);
+bar_bg.sprite.SetOpacity(0.9);
+
+# Progress Bar Fill (Cyan/Mint neon glow)
+progress_current = 0.0;
+bar_fill.image = Image.CreateColor(1, progress_bar.height, 0.0, 0.9, 1.0, 1.0);
+bar_fill.sprite = Sprite(bar_fill.image);
+bar_fill.sprite.SetPosition(progress_bar.x, progress_bar.y, 9);
+bar_fill.sprite.SetOpacity(1.0);
+
+# Status Text Message
+message_sprite = Sprite();
+message_sprite.SetPosition(center.x, center.y + 90, 10);
+
+# Animation State Variables
+anim_time = 0.0;
+pulse_speed = 2.0;
+
+# Refresh Callback (Called on every screen frame)
+fun refresh_callback() {
+    anim_time += 0.035;
+    
+    # Pulsating glow opacity: sinusoidal oscillation between 0.2 and 1.0
+    # (Math.Sin(t * speed) + 1.0) / 2.0
+    sin_val = Math.Sin(anim_time * pulse_speed);
+    glow_opacity = 0.25 + 0.75 * ((sin_val + 1.0) / 2.0);
+    
+    if (glow.sprite) {
+        glow.sprite.SetOpacity(glow_opacity);
+    }
+}
+
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# Boot Progress Callback
+fun progress_callback(duration, progress) {
+    progress_current = progress;
+    fill_width = Math.Int(progress_bar.width * progress_current);
+    if (fill_width < 1) fill_width = 1;
+    if (fill_width > progress_bar.width) fill_width = progress_bar.width;
+    
+    bar_fill.image = Image.CreateColor(fill_width, progress_bar.height, 0.0, 0.9, 1.0, 1.0);
+    bar_fill.sprite.SetImage(bar_fill.image);
+}
+
+Plymouth.SetBootProgressFunction(progress_callback);
+
+# Message Display Callback
+fun message_callback(text) {
+    text_image = Image.Text(text, 0.75, 0.8, 0.9, 1.0, "JetBrains Mono 10");
+    message_sprite.SetImage(text_image);
+    message_sprite.SetPosition(center.x - (text_image.GetWidth() / 2), center.y + 90, 10);
+}
+
+Plymouth.SetMessageFunction(message_callback);
+
+# Root / LUKS Password Prompt
+fun display_password_callback(prompt, bullets) {
+    prompt_image = Image.Text(prompt, 0.9, 0.9, 0.9, 1.0, "Plus Jakarta Sans 12");
+    message_sprite.SetImage(prompt_image);
+    message_sprite.SetPosition(center.x - (prompt_image.GetWidth() / 2), center.y + 90, 10);
+}
+
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun display_normal_callback() {
+    message_sprite.SetImage(Image());
+}
+
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+
+# Fade Out Upon Termination
+fun quit_callback() {
+    logo.sprite.SetOpacity(0.0);
+    if (glow.sprite) glow.sprite.SetOpacity(0.0);
+    bar_bg.sprite.SetOpacity(0.0);
+    bar_fill.sprite.SetOpacity(0.0);
+    message_sprite.SetOpacity(0.0);
+}
+
+Plymouth.SetQuitFunction(quit_callback);

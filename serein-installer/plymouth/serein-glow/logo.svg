@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 120" width="320" height="120">
+  <defs>
+    <linearGradient id="neon-cyan-purp" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="1" />
+      <stop offset="50%" stop-color="#bd93f9" stop-opacity="1" />
+      <stop offset="100%" stop-color="#ff79c6" stop-opacity="1" />
+    </linearGradient>
+    <filter id="neon-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur1" />
+      <feGaussianBlur stdDeviation="14" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur2" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Outer Glow Halo Emblem -->
+  <g filter="url(#neon-glow)">
+    <circle cx="60" cy="60" r="38" fill="none" stroke="url(#neon-cyan-purp)" stroke-width="4" stroke-dasharray="180 20" />
+    <polygon points="60,32 82,75 38,75" fill="none" stroke="#00e5ff" stroke-width="3" />
+    <circle cx="60" cy="60" r="6" fill="#20e2a3" />
+  </g>
+  
+  <!-- Modern Geometric Typography -->
+  <text x="116" y="65" font-family="'Plus Jakarta Sans', 'Segoe UI', sans-serif" font-weight="700" font-size="34" fill="#ffffff" letter-spacing="3">SEREIN</text>
+  <text x="262" y="65" font-family="'Plus Jakarta Sans', 'Segoe UI', sans-serif" font-weight="400" font-size="34" fill="#00e5ff" letter-spacing="2">OS</text>
+  <text x="118" y="85" font-family="'JetBrains Mono', monospace" font-size="10.5" fill="#bd93f9" letter-spacing="4">NEURAL COMPANION OS</text>
+</svg>

@@ -1,0 +1,52 @@
+[Unit]
+Description=SereinOS Core Service
+Documentation=https://github.com/serein-ai/serein-os
+After=network.target dbus.socket
+Wants=dbus.socket
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/serein-core
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+WatchdogSec=60
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# Runtime directory
+RuntimeDirectory=serein
+RuntimeDirectoryMode=0755
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=serein-core
+
+[Install]
+WantedBy=multi-user.target
+Alias=serein.service

@@ -1,0 +1,17 @@
+[Unit]
+Description=SereinOS Wayland Compositor
+Documentation=https://github.com/serein-ai/serein-os
+PartOf=serein-graphical.target
+After=systemd-user-sessions.socket
+Wants=systemd-user-sessions.socket
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/serein-compositor
+Restart=on-failure
+RestartSec=3
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+
+[Install]
+WantedBy=serein-graphical.target

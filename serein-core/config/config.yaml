@@ -1,0 +1,108 @@
+# SereinOS Core Service Configuration
+# Copy to /etc/serein/config.yaml and customize
+
+# Service
+service_name: "serein-core"
+data_dir: "/var/lib/serein"
+config_dir: "/etc/serein"
+runtime_dir: "/run/serein"
+
+# Database
+database:
+  path: "/var/lib/serein/serein.db"
+  encryption_key: null  # Set to enable SQLCipher encryption
+  pragmas:
+    journal_mode: "WAL"
+    synchronous: "NORMAL"
+    cache_size: "-32768"
+    temp_store: "MEMORY"
+    busy_timeout: "5000"
+
+# AI Provider
+ai:
+  provider: "auto"  # auto, nvidia, openrouter, ollama, local
+  models:
+    fast: "meta/llama-3.1-8b-instruct"
+    smart: "meta/llama-3.3-70b-instruct"
+    local: "llama3.1:8b"
+  nvidia_api_key: null  # Set via NVIDIA_API_KEY env var
+  openrouter_api_key: null  # Set via OPENROUTER_API_KEY env var
+  ollama_base_url: "http://localhost:11434"
+  local_model_path: null
+  request_timeout: 30.0
+  max_tokens: 2048
+  temperature: 0.7
+
+# Voice Stack
+voice:
+  enabled: true
+  tts_provider: "auto"  # auto, azure, headtts, piper
+  stt_provider: "whisper-cpp"
+  wake_word: "serein"
+  
+  # Azure TTS
+  azure_speech_key: null
+  azure_speech_region: "eastus"
+  azure_voice: "en-US-AriaNeural"
+  
+  # HeadTTS (local)
+  headtts_url: "http://localhost:5000"
+  
+  # Piper TTS (local fallback)
+  piper_voice: "en_US-lessac-medium"
+  piper_binary: "/usr/bin/piper"
+  
+  # Whisper.cpp
+  whisper_model: "base"
+  whisper_cpp_path: "/usr/bin/whisper-cli"
+  
+  # Audio
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1024
+
+# Scheduler
+scheduler:
+  enabled: true
+  max_concurrent_jobs: 10
+  timezone: "UTC"
+  persistence_path: "/var/lib/serein/scheduler"
+
+# Command Bus
+command_bus:
+  enabled: true
+  dbus_service_name: "os.serein.CommandBus"
+  dbus_object_path: "/os/serein/CommandBus"
+  permission_tiers:
+    read_only:
+      - "org.freedesktop.DBus.Properties.Get"
+      - "org.freedesktop.systemd1.Manager.ListUnits"
+      - "org.gnome.Shell.Eval"
+    reversible:
+      - "org.freedesktop.systemd1.Unit.Start"
+      - "org.freedesktop.systemd1.Unit.Stop"
+      - "org.freedesktop.Notifications.Notify"
+    destructive:
+      - "org.freedesktop.systemd1.Manager.PowerOff"
+      - "org.freedesktop.systemd1.Manager.Reboot"
+      - "org.freedesktop.PolicyKit1.Authority.CheckAuthorization"
+    sensitive:
+      - "org.freedesktop.secrets.Service.OpenSession"
+      - "org.freedesktop.NetworkManager.Settings.AddConnection"
+
+# Security
+security:
+  sqlcipher_enabled: true
+  audit_log_path: "/var/log/serein/audit.log"
+  permissions_db_path: "/var/lib/serein/permissions.db"
+  isolated_user_state: true
+  self_modification_level: 1  # 0=observe, 1=suggest, 2=patch with approval
+
+# Logging
+logging:
+  level: "INFO"
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+  file_path: "/var/log/serein/core.log"
+  rotation: "10 MB"
+  retention: "7 days"
+  compression: "gz"

@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Serein Glow Theme
+Description=High-tech pulsating glowing boot splash for SereinOS
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/serein-glow
+ScriptFile=/usr/share/plymouth/themes/serein-glow/serein-glow.script

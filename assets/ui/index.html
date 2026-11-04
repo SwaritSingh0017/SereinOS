@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>SereinOS v2.1</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Wallpaper Background -->
+  <div class="wallpaper-container">
+    <div class="wallpaper-blur"></div>
+  </div>
+
+  <!-- Top System Bar -->
+  <header id="top-bar">
+    <div class="top-bar-left">
+      <div class="brand">
+        <svg class="brand-glyph" width="16" height="16" viewBox="0 0 24 24" fill="none">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="url(#cyan-purp)"/>
+          <defs>
+            <linearGradient id="cyan-purp" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#00e5ff"/>
+              <stop offset="1" stop-color="#bd93f9"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="brand-title">SereinOS v2.1</span>
+        <span class="brand-divider">|</span>
+        <span class="status-connected" id="connection-status">Connected</span>
+      </div>
+      <div class="system-indicators">
+        <!-- Battery -->
+        <div class="indicator-battery" title="Battery: 100% (Charging)">
+          <div class="battery-shell">
+            <div class="battery-level" id="battery-fill"></div>
+            <span class="battery-terminal"></span>
+          </div>
+        </div>
+        <!-- WiFi -->
+        <button class="indicator-icon-btn" id="wifi-indicator" title="WiFi Networks">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+            <line x1="12" y1="20" x2="12.01" y2="20"/>
+          </svg>
+        </button>
+        <!-- Speaker -->
+        <button class="indicator-icon-btn" id="volume-indicator" title="Volume">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Center Clock and Date -->
+    <div class="top-bar-center" id="top-bar-clock">
+      <span class="clock-time" id="clock-display">12:00</span>
+      <span class="clock-date" id="date-display">Wednesday, Nov 4</span>
+    </div>
+
+    <div class="top-bar-right">
+      <button class="win-control-btn" id="top-fullscreen" title="Toggle Fullscreen (F11)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+        </svg>
+      </button>
+      <button class="win-control-btn" id="top-min" title="Minimize">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <button class="win-control-btn" id="top-max" title="Window State">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+      </button>
+      <button class="win-control-btn" id="top-settings" title="Settings">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Viewport -->
+  <main id="main-viewport">
+    <!-- Center-Left Stage: Avatar -->
+    <section id="avatar-stage">
+      <div class="avatar-pedestal">
+        <div class="glow-ring"></div>
+        <div class="glow-disc"></div>
+      </div>
+      <div class="avatar-wrapper">
+        <img src="serein_avatar.png" alt="Serein Avatar" class="avatar-image" id="avatar-img">
+        <div class="avatar-ambient-glow"></div>
+      </div>
+      <div class="avatar-speech-bubble" id="avatar-status-bubble">
+        <span class="bubble-tail"></span>
+        <span class="bubble-text">Ready and listening.</span>
+      </div>
+    </section>
+
+    <!-- Right Stage: Floating Native OS Widget ("Serein AI Assistant / System Hub") -->
+    <aside id="os-widget" class="glass-widget">
+      <!-- Widget Window Header -->
+      <div class="widget-header">
+        <div class="widget-header-left">
+          <div class="widget-icon-bubble">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" fill="url(#bubble-grad)"/>
+              <defs>
+                <linearGradient id="bubble-grad" x1="3" y1="3" x2="21" y2="21" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#ff79c6"/>
+                  <stop offset="0.5" stop-color="#bd93f9"/>
+                  <stop offset="1" stop-color="#00e5ff"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+        </div>
+        <div class="widget-header-right">
+          <button class="widget-control-btn" id="widget-min" title="Minimize">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <button class="widget-control-btn" id="widget-close" title="Close">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Dialogue History Stream -->
+      <div class="widget-dialogue" id="dialogue-feed">
+        <div class="dialogue-row serein">
+          <span class="dialogue-text">Welcome, Kai. How may I assist you this evening?</span>
+          <span class="dialogue-time" id="greeting-time">[19:32]</span>
+        </div>
+        <div class="dialogue-row serein">
+          <span class="dialogue-text">I've optimized your schedule.</span>
+          <span class="dialogue-time">[19:33]</span>
+        </div>
+        <div class="dialogue-row serein">
+          <span class="dialogue-text">Let's review the upcoming projects.</span>
+          <span class="dialogue-time">[19:33]</span>
+        </div>
+      </div>
+
+      <!-- Quick Interactive Input Row -->
+      <div class="widget-input-row">
+        <input type="text" id="user-input" placeholder="Ask Serein or type command..." autocomplete="off">
+        <button id="btn-mic" class="widget-input-btn mic-btn" title="Speak to Serein">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
+        <button id="btn-send" class="widget-input-btn send-btn" title="Send message">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+
+      <!-- Vocal Activity Spectrum (Mirrored Waveform: Purple -> Cyan) -->
+      <div class="widget-vocal-section">
+        <div class="vocal-header">
+          <span class="vocal-title">Vocal Activity</span>
+        </div>
+        <div class="waveform-box">
+          <canvas id="waveform-canvas" width="460" height="60"></canvas>
+        </div>
+      </div>
+
+      <!-- Hardware System Sliders (Brightness & Volume) -->
+      <div class="widget-hardware-controls">
+        <div class="hw-control-group">
+          <div class="hw-control-label">
+            <span>Display Brightness</span>
+            <span class="hw-val-badge" id="val-brightness">75%</span>
+          </div>
+          <input type="range" class="hw-slider" id="slider-brightness" min="0" max="100" value="75">
+        </div>
+        <div class="hw-control-group">
+          <div class="hw-control-label">
+            <span>Audio Volume</span>
+            <span class="hw-val-badge" id="val-volume">75%</span>
+          </div>
+          <div class="hw-slider-row">
+            <input type="range" class="hw-slider" id="slider-volume" min="0" max="100" value="75">
+            <button class="hw-mute-btn" id="btn-volume-mute" title="Toggle Mute">🔊</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Telemetry & Status Row -->
+      <div class="widget-telemetry-row">
+        <div class="telemetry-left">
+          <span>CPU: <strong id="telemetry-cpu">12%</strong></span>
+          <span class="telemetry-ram-text">RAM: <span class="accent-purple" id="telemetry-ram">6.8GB/32GB</span></span>
+        </div>
+        <div class="telemetry-right">
+          <span class="shortcuts-tag">Shortcuts</span>
+          <span class="router-status">Neural Router: <span class="accent-green">Synced (Latency: 14ms)</span></span>
+        </div>
+      </div>
+
+      <!-- Shortcuts / App Grid inside Widget -->
+      <div class="widget-shortcuts-grid">
+        <button class="shortcut-card" id="sc-briefing" title="Daily Briefing">
+          <div class="shortcut-icon icon-briefing">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </div>
+          <span class="shortcut-label">Daily Briefing</span>
+        </button>
+
+        <button class="shortcut-card" id="sc-chat" title="Neural Chat">
+          <div class="shortcut-icon icon-chat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <span class="shortcut-label">Neural Chat</span>
+        </button>
+
+        <button class="shortcut-card" id="sc-media" title="Media Player">
+          <div class="shortcut-icon icon-media">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+          <span class="shortcut-label">Media Player</span>
+        </button>
+
+        <button class="shortcut-card" id="sc-files" title="Files">
+          <div class="shortcut-icon icon-files">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <span class="shortcut-label">Files</span>
+        </button>
+
+        <button class="shortcut-card" id="sc-settings" title="Settings">
+          <div class="shortcut-icon icon-settings">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <span class="shortcut-label">Settings</span>
+        </button>
+
+        <button class="shortcut-card" id="desktop-installer-shortcut" title="Install SereinOS to Disk">
+          <div class="shortcut-icon icon-installer">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+              <line x1="12" y1="22.08" x2="12" y2="12"/>
+            </svg>
+          </div>
+          <span class="shortcut-label">Install to Disk</span>
+        </button>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Start Menu Dropup Modal -->
+  <div id="start-menu" class="start-menu-panel">
+    <div class="start-header">
+      <div class="user-badge">
+        <div class="user-avatar">K</div>
+        <div>
+          <h4>Kai</h4>
+          <span class="user-role">Administrator • SereinOS</span>
+        </div>
+      </div>
+    </div>
+    <div class="start-grid">
+      <button class="start-item" id="start-terminal">
+        <span class="start-item-icon">💻</span>
+        <span>Terminal</span>
+      </button>
+      <button class="start-item" id="start-browser">
+        <span class="start-item-icon">🌐</span>
+        <span>Browser</span>
+      </button>
+      <button class="start-item" id="start-files">
+        <span class="start-item-icon">📁</span>
+        <span>File Manager</span>
+      </button>
+      <button class="start-item" id="start-wifi">
+        <span class="start-item-icon">📶</span>
+        <span>WiFi Settings</span>
+      </button>
+      <button class="start-item" id="start-settings">
+        <span class="start-item-icon">⚙</span>
+        <span>Settings</span>
+      </button>
+      <button class="start-item" id="start-power">
+        <span class="start-item-icon">⏻</span>
+        <span>Power Options</span>
+      </button>
+      <button class="start-item" id="menu-installer-shortcut">
+        <span class="start-item-icon">💾</span>
+        <span>Install SereinOS to Disk</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Full-Width Bottom Taskbar -->
+  <footer id="bottom-taskbar">
+    <div class="taskbar-left">
+      <button class="start-button" id="btn-start" title="Start Menu">
+        <svg class="start-icon" width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="#bd93f9"/>
+        </svg>
+        <span class="start-text">Start</span>
+      </button>
+    </div>
+
+    <!-- Center Floating OS Dock Tray -->
+    <div class="taskbar-center">
+      <nav class="dock-tray">
+        <button class="dock-item item-serein" id="dock-serein" title="Serein Assistant">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#20e2a3" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </button>
+
+        <button class="dock-item" id="dock-browser" title="Chromium Browser">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bd93f9" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="4"/>
+            <line x1="21.17" y1="8" x2="12" y2="8"/>
+            <line x1="3.95" y1="6.06" x2="8.54" y2="14"/>
+            <line x1="10.88" y1="21.94" x2="15.46" y2="14"/>
+          </svg>
+        </button>
+
+        <button class="dock-item" id="dock-mail" title="Mail & Messages">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bd93f9" stroke-width="2">
+            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+            <polyline points="22,6 12,13 2,6"/>
+          </svg>
+        </button>
+
+        <button class="dock-item" id="dock-terminal" title="Code & Terminal">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bd93f9" stroke-width="2">
+            <polyline points="16 18 22 12 16 6"/>
+            <polyline points="8 6 2 12 8 18"/>
+          </svg>
+        </button>
+
+        <button class="dock-item" id="dock-gallery" title="Gallery & Media">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bd93f9" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </button>
+
+        <button class="dock-item" id="dock-settings" title="Settings">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bd93f9" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </nav>
+    </div>
+
+    <!-- Right Taskbar Clock -->
+    <div class="taskbar-right">
+      <div class="taskbar-clock" id="taskbar-clock">Tue, Oct 26 | 19:33</div>
+    </div>
+  </footer>
+
+  <!-- WiFi Modal Dialog -->
+  <div id="modal-wifi" class="modal-overlay">
+    <div class="modal-card glass-card">
+      <div class="modal-header">
+        <h3>WiFi Network Connections</h3>
+        <button class="modal-close" data-close="modal-wifi">&times;</button>
+      </div>
+      <div class="wifi-controls">
+        <button class="wifi-refresh-btn" id="btn-wifi-refresh">Scan Networks</button>
+        <span class="spinner" id="wifi-spinner" style="display: none;">Scanning...</span>
+      </div>
+      <div class="wifi-list" id="wifi-networks">
+        <div class="wifi-item placeholder">Click 'Scan Networks' to discover nearby APs</div>
+      </div>
+      <div class="wifi-connect-box" id="wifi-connect-box" style="display: none;">
+        <span id="selected-ssid"></span>
+        <input type="password" id="wifi-password" placeholder="Enter network security key...">
+        <button class="wifi-connect-btn" id="btn-wifi-connect">Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Controls Modal (Brightness, Volume, Hardware Status) -->
+  <div id="modal-quick-controls" class="modal-overlay">
+    <div class="modal-card glass-card">
+      <div class="modal-header">
+        <h3>System & Hardware Controls</h3>
+        <button class="modal-close" data-close="modal-quick-controls">&times;</button>
+      </div>
+      <div class="quick-controls-content">
+        <!-- Brightness Section -->
+        <div class="qc-section">
+          <div class="qc-header">
+            <span>Display Brightness</span>
+            <span class="qc-val" id="modal-val-brightness">80%</span>
+          </div>
+          <input type="range" class="hw-slider" id="modal-slider-brightness" min="0" max="100" value="80">
+        </div>
+        <!-- Volume Section -->
+        <div class="qc-section">
+          <div class="qc-header">
+            <span>Master Volume</span>
+            <span class="qc-val" id="modal-val-volume">80%</span>
+          </div>
+          <div class="hw-slider-row">
+            <input type="range" class="hw-slider" id="modal-slider-volume" min="0" max="100" value="80">
+            <button class="hw-mute-btn" id="modal-btn-mute" title="Toggle Mute">🔊</button>
+          </div>
+        </div>
+        <!-- Hardware Diagnostic Summary (Live Auto-Detected) -->
+        <div class="qc-hardware-info" id="qc-hardware-summary">
+          <div class="qc-info-row"><span>Host Machine:</span><strong id="qc-hw-machine">Detecting system...</strong></div>
+          <div class="qc-info-row"><span>Processor (CPU):</span><strong id="qc-hw-cpu">Detecting CPU...</strong></div>
+          <div class="qc-info-row"><span>Graphics (GPU):</span><strong id="qc-hw-gpu">Detecting GPU...</strong></div>
+          <div class="qc-info-row"><span>System Memory:</span><strong id="qc-hw-ram">Detecting RAM...</strong></div>
+          <div class="qc-info-row"><span>Audio Subsystem:</span><strong id="qc-hw-audio">Detecting audio...</strong></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Standalone Graphical OS Installer Wizard Modal -->
+  <div id="modal-installer" class="modal-overlay">
+    <div class="modal-card glass-card installer-modal-card">
+      <div class="modal-header">
+        <div class="installer-modal-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+            <line x1="12" y1="22.08" x2="12" y2="12"/>
+          </svg>
+          <h3>Install SereinOS to Disk</h3>
+        </div>
+        <button class="modal-close" data-close="modal-installer">&times;</button>
+      </div>
+
+      <!-- Step Indicators Breadcrumbs -->
+      <div class="installer-steps-nav">
+        <div class="step-bullet active" data-step="1">1. System Check</div>
+        <div class="step-bullet" data-step="2">2. Destination Drive</div>
+        <div class="step-bullet" data-step="3">3. User & Host</div>
+        <div class="step-bullet" data-step="4">4. Install & Logs</div>
+        <div class="step-bullet" data-step="5">5. Finish</div>
+      </div>
+
+      <!-- Step 1: Pre-flight Check -->
+      <div class="installer-step active" id="installer-step-1">
+        <div class="step-hero">
+          <h4>Welcome to SereinOS Installer</h4>
+          <p class="step-desc">Verify hardware compatibility before installing SereinOS onto your internal drive.</p>
+        </div>
+        <div class="hardware-check-grid">
+          <div class="check-item"><span class="check-label">Target Architecture:</span><strong id="chk-arch">x86_64 (AMD64)</strong><span class="check-badge pass">✔ PASS</span></div>
+          <div class="check-item"><span class="check-label">Processor (APU):</span><strong id="chk-cpu">AMD Dual-Core E-450 / 64-bit</strong><span class="check-badge pass">✔ PASS</span></div>
+          <div class="check-item"><span class="check-label">Memory (RAM):</span><strong id="chk-ram">Detected >= 4GB</strong><span class="check-badge pass">✔ PASS</span></div>
+          <div class="check-item"><span class="check-label">GPU Acceleration:</span><strong id="chk-gpu">Radeon HD 6320 (KMS / Mesa)</strong><span class="check-badge pass">✔ READY</span></div>
+          <div class="check-item"><span class="check-label">Power & Battery:</span><strong id="chk-power">AC Adapter Connected</strong><span class="check-badge pass">✔ OK</span></div>
+        </div>
+        <div class="installer-notice">
+          <span class="notice-icon">ℹ</span>
+          <span>Ensure your laptop is plugged into mains AC power during disk installation.</span>
+        </div>
+      </div>
+
+      <!-- Step 2: Target Drive & Firmware Selection -->
+      <div class="installer-step" id="installer-step-2" style="display: none;">
+        <div class="step-hero">
+          <h4>Select Target Storage Disk</h4>
+          <p class="step-desc">Choose internal hard drive or SSD. Live USB installer media is automatically protected.</p>
+        </div>
+        <div class="form-group">
+          <label for="installer-disk-select">Target Storage Device:</label>
+          <select id="installer-disk-select" class="installer-input">
+            <option value="">Scanning storage devices...</option>
+          </select>
+        </div>
+        <div class="disk-meta-box" id="installer-disk-details">
+          <div class="disk-meta-row"><span>Drive Model:</span><strong id="installer-disk-model">--</strong></div>
+          <div class="disk-meta-row"><span>Drive Capacity:</span><strong id="installer-disk-capacity">--</strong></div>
+          <div class="disk-meta-row"><span>Partition Scheme:</span><strong id="installer-disk-pttable">--</strong></div>
+        </div>
+        <div class="form-group">
+          <label for="installer-firmware-select">Bootloader & Partition Mode:</label>
+          <select id="installer-firmware-select" class="installer-input">
+            <option value="auto">Auto-Detect (Firmware Native)</option>
+            <option value="uefi">64-bit UEFI (GPT + 512MB ESP + Swap + ext4)</option>
+            <option value="bios">Legacy BIOS (MBR + ext4 Root + Swap)</option>
+          </select>
+        </div>
+        <div class="installer-danger-warning">
+          <strong>⚠ WARNING:</strong> The selected disk will be formatted and partitioned. All existing data will be permanently replaced.
+        </div>
+      </div>
+
+      <!-- Step 3: User Setup & Hostname -->
+      <div class="installer-step" id="installer-step-3" style="display: none;">
+        <div class="step-hero">
+          <h4>User Account & Computer Identity</h4>
+          <p class="step-desc">Create your primary administrator user account and computer network name.</p>
+        </div>
+        <div class="form-group">
+          <label for="installer-username">Primary User Name:</label>
+          <input type="text" id="installer-username" class="installer-input" value="serein" placeholder="e.g. kai">
+        </div>
+        <div class="form-group">
+          <label for="installer-password">Account Password:</label>
+          <input type="password" id="installer-password" class="installer-input" value="serein" placeholder="Enter secure password">
+        </div>
+        <div class="form-group">
+          <label for="installer-hostname">Computer Name (Hostname):</label>
+          <input type="text" id="installer-hostname" class="installer-input" value="serein-pc" placeholder="e.g. serein-pc">
+        </div>
+      </div>
+
+      <!-- Step 4: Installation Progress & Real-Time Logs -->
+      <div class="installer-step" id="installer-step-4" style="display: none;">
+        <div class="step-hero">
+          <h4>Installing SereinOS to Disk</h4>
+          <p class="step-desc" id="installer-step4-desc">Dry-run simulation & active installation progress.</p>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill" id="installer-progress-bar" style="width: 0%;"></div>
+          </div>
+          <div class="progress-info-row">
+            <span class="progress-phase" id="installer-phase">Ready to install</span>
+            <span class="progress-percent" id="installer-progress-pct">0%</span>
+          </div>
+        </div>
+        <div class="terminal-log-window">
+          <div class="terminal-log-header">
+            <span>TERMINAL LOG OUTPUT</span>
+            <span class="terminal-log-live">● LIVE</span>
+          </div>
+          <pre class="terminal-log-body" id="installer-terminal-log">Waiting for installation command...</pre>
+        </div>
+        <div class="installer-actions-row">
+          <button class="installer-btn dryrun" id="btn-installer-dryrun">Run Dry-Run Verification</button>
+          <button class="installer-btn primary" id="btn-installer-start">Start Real Installation</button>
+        </div>
+      </div>
+
+      <!-- Step 5: Completion & Reboot -->
+      <div class="installer-step" id="installer-step-5" style="display: none;">
+        <div class="step-hero success">
+          <div class="success-icon">✔</div>
+          <h4>Installation Complete!</h4>
+          <p class="step-desc">SereinOS has been successfully written to your disk with configured dual-mode bootloader.</p>
+        </div>
+        <div class="completion-details">
+          <p>Remove the USB installation media before restarting your computer.</p>
+          <p>Your AI companion and desktop environment will start automatically on reboot.</p>
+        </div>
+        <div class="completion-actions">
+          <button class="installer-btn reboot" id="btn-installer-reboot">Reboot into SereinOS</button>
+          <button class="installer-btn secondary" id="btn-installer-finish">Close Installer</button>
+        </div>
+      </div>
+
+      <!-- Wizard Navigation Controls (Steps 1-3) -->
+      <div class="installer-footer" id="installer-nav-footer">
+        <button class="installer-btn secondary" id="btn-installer-back" style="display: none;">Back</button>
+        <button class="installer-btn primary" id="btn-installer-next">Next Step →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive Glass Terminal Modal -->
+  <div id="modal-terminal" class="modal-overlay">
+    <div class="modal-card glass-card terminal-modal-card">
+      <div class="modal-header">
+        <div class="terminal-title-wrap">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">serein@sereinos: ~ (bash)</span>
+        </div>
+        <button class="modal-close" data-close="modal-terminal">&times;</button>
+      </div>
+      <div class="terminal-screen" id="term-screen">
+        <div class="terminal-banner">SereinOS Cyber Terminal v2.1 • Linux Kernel 6.1 • Type 'help' or any Linux command</div>
+        <div class="terminal-history" id="term-history"></div>
+        <div class="terminal-prompt-line">
+          <span class="terminal-ps1" id="term-ps1">serein@sereinos:~$</span>
+          <input type="text" class="terminal-input" id="term-input" autocomplete="off" spellcheck="false" autofocus>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive Glass File Explorer Modal -->
+  <div id="modal-files" class="modal-overlay">
+    <div class="modal-card glass-card files-modal-card">
+      <div class="modal-header">
+        <div class="files-title-wrap">
+          <span>📁 SereinOS File Explorer</span>
+        </div>
+        <button class="modal-close" data-close="modal-files">&times;</button>
+      </div>
+      <div class="files-toolbar">
+        <button class="files-tool-btn" id="files-btn-back" title="Go Up / Parent Directory">⬆ Up</button>
+        <button class="files-tool-btn" id="files-btn-home" title="Home Directory">🏠 Home</button>
+        <button class="files-tool-btn" id="files-btn-refresh" title="Refresh">🔄 Refresh</button>
+        <div class="files-path-bar" id="files-current-path">/home/serein</div>
+      </div>
+      <div class="files-body">
+        <div class="files-grid" id="files-grid">
+          <div class="files-loading">Loading filesystem...</div>
+        </div>
+      </div>
+      <div class="files-viewer-panel" id="files-viewer-panel" style="display: none;">
+        <div class="viewer-header">
+          <span id="viewer-filename">File Preview</span>
+          <button class="viewer-close" id="btn-close-viewer">✕</button>
+        </div>
+        <pre class="viewer-content" id="viewer-content"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Comprehensive System Settings Modal -->
+  <div id="modal-settings" class="modal-overlay">
+    <div class="modal-card glass-card settings-modal-card">
+      <div class="modal-header">
+        <div class="settings-title-wrap">
+          <span>⚙ SereinOS System Settings</span>
+        </div>
+        <button class="modal-close" data-close="modal-settings">&times;</button>
+      </div>
+      <div class="settings-container">
+        <!-- Tabs Navigation -->
+        <div class="settings-sidebar">
+          <button class="settings-tab-btn active" data-tab="tab-display">🖥 Display</button>
+          <button class="settings-tab-btn" data-tab="tab-audio">🔊 Audio & Sound</button>
+          <button class="settings-tab-btn" data-tab="tab-network">🌐 Network & Wi-Fi</button>
+          <button class="settings-tab-btn" data-tab="tab-ai">🧠 AI & Neural Brain</button>
+          <button class="settings-tab-btn" data-tab="tab-about">ℹ About SereinOS</button>
+        </div>
+        <!-- Tab Panes -->
+        <div class="settings-tab-content">
+          <!-- Display Tab -->
+          <div class="settings-pane active" id="tab-display">
+            <h4>Display & Graphics</h4>
+            <div class="setting-item">
+              <div class="setting-label-row">
+                <span>Screen Brightness</span>
+                <span id="set-brightness-val">75%</span>
+              </div>
+              <input type="range" class="hw-slider" id="set-slider-brightness" min="0" max="100" value="75">
+            </div>
+            <div class="setting-item">
+              <span class="setting-label">Graphics Driver</span>
+              <span class="setting-badge" id="set-gpu-badge">Detecting GPU...</span>
+            </div>
+          </div>
+          <!-- Audio Tab -->
+          <div class="settings-pane" id="tab-audio" style="display: none;">
+            <h4>Audio Subsystem</h4>
+            <div class="setting-item">
+              <div class="setting-label-row">
+                <span>Master Volume</span>
+                <span id="set-volume-val">75%</span>
+              </div>
+              <div class="hw-slider-row">
+                <input type="range" class="hw-slider" id="set-slider-volume" min="0" max="100" value="75">
+                <button class="hw-mute-btn" id="set-btn-mute">🔊</button>
+              </div>
+            </div>
+            <div class="setting-item">
+              <span class="setting-label">Audio Device</span>
+              <span class="setting-badge" id="set-audio-device-badge">Detecting audio...</span>
+            </div>
+            <div class="setting-item" style="margin-top: 10px;">
+              <button class="installer-btn primary" id="btn-test-voice-audio">🔊 Test Voice & Audio Playback</button>
+              <p class="setting-hint" style="margin-top: 6px;">Click to test Serein's voice synthesis and verify sound output in your environment.</p>
+            </div>
+          </div>
+          <!-- Network Tab -->
+          <div class="settings-pane" id="tab-network" style="display: none;">
+            <h4>Network & Connectivity</h4>
+            <div class="setting-item">
+              <span class="setting-label">Virtual Ethernet (NAT)</span>
+              <span class="setting-badge pass">Connected (ens33) • Online</span>
+            </div>
+            <div class="setting-item">
+              <p class="setting-hint">Hypervisors like VMware bridge network through virtual Ethernet. On physical laptops, wireless networks are detected automatically.</p>
+              <button class="installer-btn secondary" id="btn-open-wifi-from-settings">Open Wi-Fi Access Points</button>
+            </div>
+          </div>
+          <!-- AI Brain Tab -->
+          <div class="settings-pane" id="tab-ai" style="display: none;">
+            <h4>AI & Neural Brain Engine</h4>
+            <div class="setting-item">
+              <label class="setting-label">AI Intelligence Provider:</label>
+              <select id="set-ai-provider" class="installer-input">
+                <option value="local">Local Serein Brain (100% Offline)</option>
+                <option value="ollama">Local Ollama Instance (localhost:11434)</option>
+                <option value="openai">OpenAI (GPT-4o / GPT-4o-mini)</option>
+                <option value="gemini">Google Gemini Live / Flash</option>
+                <option value="openrouter">OpenRouter Multi-Model</option>
+              </select>
+            </div>
+            <div class="setting-item" id="set-api-key-group">
+              <label class="setting-label">Cloud API Key (Optional):</label>
+              <input type="password" id="set-api-key" class="installer-input" placeholder="sk-... (Stored locally)">
+              <p class="setting-hint">When Wi-Fi is connected, Serein can route complex queries to your custom cloud API.</p>
+            </div>
+            <button class="installer-btn primary" id="btn-save-ai-settings">Save AI Settings</button>
+          </div>
+          <!-- About Tab -->
+          <div class="settings-pane" id="tab-about" style="display: none;">
+            <h4>About SereinOS</h4>
+            <div class="about-hero">
+              <div class="about-logo">§</div>
+              <div>
+                <h3>SereinOS v2.1</h3>
+                <p>The Persistent Autonomous AI Companion Operating System</p>
+              </div>
+            </div>
+            <div class="qc-hardware-info" id="about-hardware-summary">
+              <div class="qc-info-row"><span>Architecture:</span><strong id="about-arch">x86_64 (AMD64)</strong></div>
+              <div class="qc-info-row"><span>Host System:</span><strong id="about-device">Detecting live system...</strong></div>
+              <div class="qc-info-row"><span>Processor (CPU):</span><strong id="about-cpu">Detecting live CPU...</strong></div>
+              <div class="qc-info-row"><span>Graphics (GPU):</span><strong id="about-gpu">Detecting live GPU...</strong></div>
+              <div class="qc-info-row"><span>System Memory:</span><strong id="about-ram">Detecting live RAM...</strong></div>
+              <div class="qc-info-row"><span>Audio Subsystem:</span><strong id="about-audio">Detecting live audio...</strong></div>
+              <div class="qc-info-row"><span>Voice Engine:</span><strong id="about-voice">Piper TTS + Web Audio Engine</strong></div>
+              <div class="qc-info-row" style="display: none;" aria-hidden="true"><span>Hardware Baseline:</span><span>Sony VAIO VPCYB35AN (AMD Dual-Core E-450 / AMD Radeon HD 6320)</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Native Glass Cyber Browser Modal -->
+  <div id="modal-browser" class="modal-overlay">
+    <div class="modal-card glass-card browser-modal-card">
+      <div class="modal-header">
+        <div class="browser-header-left">
+          <div class="terminal-dots">
+            <span class="dot red" data-close="modal-browser"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <span class="terminal-title">🌐 SereinOS Cyber Browser</span>
+        </div>
+        <div class="browser-nav-bar">
+          <button id="browser-btn-back" class="browser-nav-btn" title="Back">◀</button>
+          <button id="browser-btn-forward" class="browser-nav-btn" title="Forward">▶</button>
+          <button id="browser-btn-reload" class="browser-nav-btn" title="Reload">⟳</button>
+          <input type="text" id="browser-url-input" class="browser-url-bar" value="https://duckduckgo.com" placeholder="Enter URL or search query...">
+          <button id="browser-btn-go" class="browser-go-btn">Go</button>
+        </div>
+        <button class="modal-close" data-close="modal-browser">&times;</button>
+      </div>
+      <div class="browser-bookmarks-bar">
+        <span class="bookmark-item" data-url="https://duckduckgo.com">🦆 DuckDuckGo</span>
+        <span class="bookmark-item" data-url="https://en.wikipedia.org">📖 Wikipedia</span>
+        <span class="bookmark-item" data-url="https://github.com">🐙 GitHub</span>
+        <span class="bookmark-item" data-url="https://news.ycombinator.com">⚡ HackerNews</span>
+      </div>
+      <div class="browser-frame-container">
+        <iframe id="browser-iframe" src="https://duckduckgo.com" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <!-- Native Glass Power Options Dialog Modal (No browser confirm!) -->
+  <div id="modal-power" class="modal-overlay">
+    <div class="modal-card glass-card power-modal-card">
+      <div class="modal-header">
+        <div class="power-title-wrap">
+          <span>⏻ Power Options</span>
+        </div>
+        <button class="modal-close" data-close="modal-power">&times;</button>
+      </div>
+      <div class="power-content">
+        <p class="power-prompt">Select an action for SereinOS:</p>
+        <div class="power-buttons-grid">
+          <button class="power-action-btn btn-poweroff" id="btn-power-shutdown">
+            <span class="power-icon">🛑</span>
+            <span class="power-btn-title">Shut Down</span>
+            <span class="power-btn-desc">Power off computer completely</span>
+          </button>
+          <button class="power-action-btn btn-reboot" id="btn-power-restart">
+            <span class="power-icon">🔄</span>
+            <span class="power-btn-title">Restart</span>
+            <span class="power-btn-desc">Reboot system safely</span>
+          </button>
+          <button class="power-action-btn btn-suspend" id="btn-power-sleep">
+            <span class="power-icon">🌙</span>
+            <span class="power-btn-title">Sleep</span>
+            <span class="power-btn-desc">Suspend system to RAM</span>
+          </button>
+        </div>
+      </div>
+      <div class="power-footer">
+        <button class="installer-btn secondary" id="btn-power-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Native OS Toast Notification Banner -->
+  <div id="os-toast-container" class="os-toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="vendor/serein-vrm.bundle.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

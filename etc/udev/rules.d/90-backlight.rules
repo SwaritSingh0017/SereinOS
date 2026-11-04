@@ -1,0 +1,6 @@
+# SereinOS udev rules for Sony VAIO VPCYB35AN Backlight Control
+# Allows non-root users in group 'video' to adjust display brightness via /sys/class/backlight
+
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video $sys$devpath/brightness", RUN+="/bin/chmod 664 $sys$devpath/brightness"
+ACTION=="change", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video $sys$devpath/brightness", RUN+="/bin/chmod 664 $sys$devpath/brightness"
+SUBSYSTEM=="backlight", ACTION=="add", RUN+="/bin/chmod 664 $sys$devpath/brightness"

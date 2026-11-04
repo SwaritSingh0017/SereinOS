@@ -1,0 +1,24 @@
+{
+  "name": "com.serein.avatar",
+  "displayName": "Serein Avatar",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "SereinOS VRM Avatar for Wayland Compositor",
+  "keywords": ["avatar", "vrm", "serein"],
+  "author": {
+    "name": "SereinOS",
+    "email": "",
+    "url": "https://github.com/serein-os"
+  },
+  "dependencies": {
+    "com.vrmc.vrm": "0.114.0",
+    "com.vrmc.univrm": "0.114.0"
+  },
+  "samples": [
+    {
+      "displayName": "Serein Avatar Setup",
+      "description": "Sets up the Serein avatar with networking",
+      "path": "Samples~/AvatarSetup"
+    }
+  ]
+}

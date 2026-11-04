@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=SereinOS
+Comment=SereinOS Wayland Session
+Exec=serein-compositor
+Type=Application
+DesktopNames=SereinOS

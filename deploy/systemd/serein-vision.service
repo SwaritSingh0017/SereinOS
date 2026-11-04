@@ -1,0 +1,14 @@
+[Unit]
+Description=SereinOS Vision Service
+Documentation=https://github.com/serein-ai/serein-os
+After=serein-core.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/serein-vision
+Restart=on-failure
+RestartSec=5
+Environment=VISION_CONFIG_DIR=/etc/serein/vision
+
+[Install]
+WantedBy=multi-user.target

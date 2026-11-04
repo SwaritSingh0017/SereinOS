@@ -1,0 +1,15 @@
+[Unit]
+Description=SereinOS Web Dashboard
+Documentation=https://github.com/serein-ai/serein-os
+After=network.target
+
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/serein-web
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONPATH=/usr/local/lib/serein:/usr/local/lib/serein/serein-voice
+
+[Install]
+WantedBy=multi-user.target

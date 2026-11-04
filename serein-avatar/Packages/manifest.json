@@ -1,0 +1,24 @@
+{
+  "dependencies": {
+    "com.vrmc.univrm": "0.127.2",
+    "com.vrmc.vrm": "0.127.2",
+    "com.vrmc.vrmshaders": "0.127.2",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.modules.animation": "1.0.0",
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.ui": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0"
+  },
+  "scopedRegistries": [
+    {
+      "name": "package.openupm.com",
+      "url": "https://package.openupm.com",
+      "scopes": [
+        "com.vrmc.univrm",
+        "com.vrmc.vrm",
+        "com.vrmc.vrmshaders"
+      ]
+    }
+  ]
+}

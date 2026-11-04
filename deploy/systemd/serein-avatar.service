@@ -1,0 +1,20 @@
+[Unit]
+Description=SereinOS 3D Avatar
+Documentation=https://github.com/serein-ai/serein-os
+PartOf=serein-graphical.target
+After=serein-compositor.service
+Wants=serein-compositor.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/serein-avatar
+Restart=on-failure
+RestartSec=5
+Environment=UNITY_GRAPHICS_API=openGL
+Environment=MESA_LOADER_DRIVER_OVERRIDE=iris
+
+# GPU access
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=serein-graphical.target

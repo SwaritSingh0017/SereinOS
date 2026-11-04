@@ -1,0 +1,15 @@
+[Unit]
+Description=SereinOS Voice Service
+Documentation=https://github.com/serein-ai/serein-os
+After=serein-core.service
+PartOf=serein-graphical.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/serein-voice
+Restart=on-failure
+RestartSec=5
+Environment=VOICE_CONFIG_DIR=/etc/serein/voice
+
+[Install]
+WantedBy=serein-graphical.target

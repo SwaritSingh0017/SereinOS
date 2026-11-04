@@ -1,0 +1,9 @@
+[Unit]
+Description=SereinOS Graphical Environment
+Documentation=https://github.com/serein-ai/serein-os
+Requires=serein-core.service
+After=serein-core.service
+Wants=serein-compositor.service serein-avatar.service
+
+[Install]
+WantedBy=graphical.target
