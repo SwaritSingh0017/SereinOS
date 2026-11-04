@@ -1,0 +1,598 @@
+# SereinOS — Comprehensive Architecture Audit & Vulnerability Report
+
+**Date:** November 5, 2026  
+**Auditor:** Lead Software Architect & Principal Systems Engineer  
+**Repository:** `https://github.com/SwaritSingh0017/SereinOS.git`  
+**Active Working Branch:** `architecture/rebuild-foundation`  
+**Target Hardware Profiles:**
+- **Minimum Supported Target:** Sony VAIO VPCYB35AN / VPCYB15AG (AMD E-450 APU 1.65 GHz, 16GB DDR3 RAM, 256GB SATA SSD, AMD Radeon HD 6320 Graphics)
+- **Development & High-Tier Target:** HP Victus 15 (AMD Ryzen 5 5600H, NVIDIA GeForce RTX 3050 Laptop GPU 4GB VRAM, 8GB DDR4 RAM, 512GB NVMe SSD)
+
+---
+
+## 1. Executive Summary
+
+SereinOS is envisioned as a unified, local-first, companion operating system where the AI companion (*Serein*) and the operating system (*her body*) operate as a single coherent system. 
+
+An exhaustive, evidence-based audit of all tracked repository files on branch `architecture/rebuild-foundation` reveals a dual-state codebase:
+1. A **legacy monolithic prototype** under [`src/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/src) consisting of synchronous, blocking Python code with hardcoded database paths and no package isolation.
+2. A **modern async service package** under [`serein-core/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core) featuring FastAPI, async event bus, hardware classification, and SQLite schema migrations.
+3. A **native C Wayland compositor** under [`serein-compositor/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-compositor) based on `wlroots`, designed to manage custom layers and avatar overlay windows.
+4. An **avatar visualization package** under [`serein-avatar/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-avatar) containing Unity C# scripts, blendshape mappers, and VRM assets.
+5. An **independent speech engine** under [`serein-voice/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-voice) with VAD, audio capture, wake-word detection, and Piper/Whisper wrappers.
+6. An **operating system installer** under [`serein-installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer) and its duplicate [`serein_installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein_installer) containing partition planning, dry-run simulations, and live-build scripts.
+
+### Key Audit Findings
+- **High-Risk Security Posture:** Twelve critical vulnerabilities were confirmed in the source code, including hardcoded default credentials (`serein:serein`), unrestricted passwordless sudo (`NOPASSWD:ALL`), unauthenticated browser media capture flags (`--use-fake-ui-for-media-stream`), unvalidated file deletions (`shutil.rmtree`), Server-Side Request Forgery (SSRF) in the command bus, unbound confirmation tokens, and arbitrary subprocess execution.
+- **Code Duplication & Architectural Schism:** `src/` duplicates the entire subsystem tree of `serein-core/`. Loose scripts (`main.py`, `check_db.py`, `update_schema.py`, `SereinOS_cleanup.ps1`) in the repository root reference outdated paths. `serein_installer/` is a byte-for-byte duplicate of `serein-installer/`.
+- **Low-Spec Hardware Incompatibility in Package Metadata:** While [`serein_core/hardware.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/hardware.py) correctly categorizes the Sony VAIO E-450 as `minimum` tier, `serein-core/pyproject.toml` mandates heavy machine-learning packages (`torch>=2.1.0`, `transformers>=4.36.0`, `sentence-transformers>=2.2.2`, `accelerate>=0.25.0`, `easyocr>=1.7.1`, `opencv-python-headless>=4.8.1`). These packages will exhaust storage and cause out-of-memory or compile failures on the AMD E-450 with legacy Radeon HD 6320 graphics.
+- **Empirical Test Suite Integrity:** Across the 808 collected tests, unit and subsystem tests pass 100% when executed in isolated suites (446/446 in `tests/`, 207/207 in `serein-core/tests/`). However, executing the entire suite end-to-end stalls due to an unmocked live subprocess launch in [`serein-core/tests/test_m2_brain.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_m2_brain.py#L309) invoking `open terminal` on the host OS.
+
+---
+
+## 2. Complete Repository Inventory
+
+Total tracked files: **205**
+
+| Directory / Path | Tracked Files | Primary Languages | Purpose / Contents |
+| :--- | :---: | :--- | :--- |
+| [`serein-core/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core) | 63 | Python, TOML | Canonical async OS daemon, Web API, Local Brain, Command Bus, Scheduler, DB migrations, tests |
+| [`src/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/src) | 28 | Python | Legacy prototype monolithic engines (synchronous, duplicate) |
+| [`serein-compositor/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-compositor) | 26 | C, Meson, CMake, Shell | Native wlroots Wayland compositor, avatar bridge, layer-shell |
+| [`tests/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/tests) | 19 | Python | Adversarial, stress, challenger, and milestone integration tests |
+| [`assets/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/assets) | 14 | PNG, JPG | Wallpapers, avatar visual references, branding assets |
+| [`docs/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/docs) | 13 | Markdown, DOCX | System specifications, persona prompts, database documentation |
+| [`serein-avatar/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-avatar) | 10 | C#, VRM, Shell, JSON | Unity VRM avatar controller, VisemeMapper, performance player |
+| [`serein-installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer) | 8 | Python, Shell, Plymouth | ISO build script, partition planner engine, Plymouth boot splash |
+| [`deploy/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/deploy) | 8 | systemd `.service`, `.target` | Systemd service definitions for core, compositor, kiosk, audio |
+| [`scripts/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/scripts) | 4 | Shell | Build, lint, and packaging helper scripts |
+| [`serein-voice/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-voice) | 4 | Python | Audio capture, WebRTC VAD, wake-word detector, TTS/STT backends |
+| [`etc/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/etc) | 4 | Conf, YAML, Rules | System config templates, Udev rules, logrotate configs |
+| [`tools/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/tools) | 3 | Python, Shell | Development CLI and benchmarking utilities |
+| [`serein_installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein_installer) | 2 | Python | **Duplicate** copy of `serein-installer/installer_engine.py` |
+| Root files | 9 | Python, PS1, PDF, MD | Root scripts (`main.py`, `check_db.py`, `update_schema.py`, `SereinOS_cleanup.ps1`, `SereinOS_Master_Specification_v3.pdf`, `README.md`) |
+
+### Non-Text / Binary Files Tracked in Git
+- [`serein-avatar/Assets/Models/avatar.vrm`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-avatar/Assets/Models/avatar.vrm) (3D VRM Model)
+- [`serein-avatar/Assets/Models/serein.vrm`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-avatar/Assets/Models/serein.vrm) (3D VRM Model)
+- [`docs/SereinOS_PRD_v1.0.docx`](file:///d:/PLACEMENT/PROJECTS/SereinOS/docs/SereinOS_PRD_v1.0.docx) (Microsoft Word binary)
+- [`SereinOS_Master_Specification_v3.pdf`](file:///d:/PLACEMENT/PROJECTS/SereinOS/SereinOS_Master_Specification_v3.pdf) (PDF Document)
+- Assets: Wallpapers & Icons (`assets/wallpapers/*.jpg`, `assets/avatar/*.png`, `serein-installer/plymouth/serein-glow/*.png`)
+
+---
+
+## 3. Module-by-Module Audit (21 Canonical Subsystems)
+
+### 1. Core (`serein-core/src/serein_core/main.py`, `base.py`, `cli.py`, `__main__.py`)
+- **Responsibility:** Daemon lifecycle orchestrator, signal handling, component bootstrapping, and central turn execution.
+- **Current State:** Functional async coordination. `SereinCore.process_input()` links Intent, Decision, Command Bus, Scheduler, Dialogue Persistence, and Voice Event Glue.
+- **Public Interfaces:** `async initialize()`, `async shutdown()`, `async process_input(text, context, **kwargs) -> Dict`.
+- **Dependencies:** `asyncio`, `logging`, `serein_core.database`, `serein_core.events`, `serein_core.config`.
+- **Database Requirements:** Writes to `conversation_sessions`, `conversation_messages`, and `system_events`.
+- **Events & Communication:** Publishes `system.started`, `system.shutdown`, `core.voice_output`; subscribes to `core.voice_input`.
+- **Resource Requirements:** Minimal (~25 MB RAM idle). Runs efficiently on Sony VAIO.
+- **Failure Handling:** Catches individual engine initialization exceptions; logs errors without fatal abort.
+- **Security Boundaries:** Exposes internal components. Needs strict isolation so unauthenticated inputs cannot execute arbitrary methods.
+- **Classification:** **REFACTOR** (Retain `serein-core`, wire with strict input bounds, eliminate root `main.py`).
+
+### 2. Brain / Intelligence (`serein_core/ai.py`, `local_brain.py`, `inference.py`, `model_manager.py`)
+- **Responsibility:** Offline natural language generation, reasoning, heuristic intent answering, and optional multi-provider cloud routing (OpenAI, Anthropic, Gemini, Custom OpenAI).
+- **Current State:** Well-implemented hybrid approach. [`local_brain.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/local_brain.py) contains deterministic rule-based engines for offline operations (slang normalization, system queries, time, math, greeting generation). [`ai.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/ai.py) implements `BrainRouter` with graceful offline fallback when no network or API keys exist.
+- **Public Interfaces:** `async chat(messages, tier, **kwargs) -> ChatResponse`, `async stream_chat(...)`.
+- **Dependencies:** `aiohttp` for cloud endpoints; optional `llama_cpp` for GGUF; fallback to zero-dependency deterministic engine.
+- **Database Requirements:** Dialogue history saved via database layer.
+- **Resource Requirements:** On VAIO: 0 MB VRAM, < 100 MB RAM for deterministic engine. On Victus: 4GB VRAM for 3B-4B GGUF models via llama.cpp.
+- **Security Boundaries:** Prompts must be sanitized; LLM outputs must NEVER be piped directly to shell or eval.
+- **Classification:** **KEEP & HARDEN** (The offline deterministic generator is essential for the Sony VAIO).
+
+### 3. Intent System (`serein_core/intent/classifier.py`, `schemas.py`, `tools.py`)
+- **Responsibility:** Parsing natural language text or transcribed speech into structured intents (`system_control`, `app_control`, `file_operation`, `reminder`, `question`, `chit_chat`, `settings`).
+- **Current State:** Fast regex and rule-based parser. Categorizes commands with confidence scores and entity extraction (`action`, `application`, `path`, `time`, `task`).
+- **Public Interfaces:** `classify(text: str) -> IntentResult`.
+- **Dependencies:** Pure standard library (`re`, `dataclasses`, `enum`).
+- **Resource Requirements:** Sub-millisecond execution (< 1ms), zero GPU, negligible memory.
+- **Security Boundaries:** Handles untrusted user string inputs. Guarded against ReDoS.
+- **Classification:** **KEEP**.
+
+### 4. Decision Engine (`serein_core/decision.py`)
+- **Responsibility:** Evaluates `IntentResult` alongside contextual state, safety checks, and user confirmation to decide the execution route (`BRAIN`, `COMMAND_BUS`, `SCHEDULER`, `CLARIFY`, `BLOCKED`).
+- **Current State:** Complete and robust. Enforces safety blocks and routes destructive actions to confirmation before dispatch.
+- **Public Interfaces:** `async decide(intent_result, context, safety, user_confirmation) -> Decision`.
+- **Dependencies:** Standard library.
+- **Security Boundaries:** Primary gatekeeper before OS action execution.
+- **Classification:** **KEEP**.
+
+### 5. Command Bus / OS Control (`serein_core/command_bus.py`)
+- **Responsibility:** System execution subsystem for application launching, window queries, file manipulation, volume/brightness changes, power states, and network requests.
+- **Current State:** Implements a 4-tier permission model (`READ_ONLY`, `REVERSIBLE`, `DESTRUCTIVE`, `SENSITIVE`). However, it has **critical security vulnerabilities**: unvalidated path operations, unrestricted `launch_app` execution, parameter-tamperable confirmation tokens, SSRF via `network_request`, and disconnected safety layers.
+- **Public Interfaces:** `async execute(command: str, params: Dict, confirmation_token: str = None) -> CommandResult`.
+- **Dependencies:** `asyncio`, `pathlib`, `psutil`, `shutil`, `aiohttp`, `serein_core.events`.
+- **Classification:** **REPLACE / MAJOR REFACTOR** (Mandatory rewrite of token verification, path sandboxing, SSRF guards, and application whitelisting).
+
+### 6. Scheduler / Reminders (`serein_core/scheduler.py`, `proactive.py`)
+- **Responsibility:** Persistent background scheduling for absolute, relative, recurring (cron), and conditional triggers (e.g. low battery, idle time). Must survive reboots.
+- **Current State:** Working async event loop backed by SQLite `scheduled_events` table. Supports croniter recurring rules.
+- **Public Interfaces:** `async schedule_event(event: ScheduledEvent) -> str`, `async cancel_event(id: str) -> bool`.
+- **Dependencies:** `croniter`, `asyncio`, `serein_core.database`.
+- **Database Requirements:** `scheduled_events` table with index on `fires_at`.
+- **Failure Handling:** Survives restarts by reloading pending events from SQLite during `_load_events()`.
+- **Classification:** **KEEP & EXTEND** (Add missed-event catch-up on boot).
+
+### 7. Memory Engine (`serein_core/memory.py`, `src/core/memory/`)
+- **Responsibility:** Multi-tiered memory system: working memory (bounded FIFO), short-term dialogue context, episodic memory, and semantic memory.
+- **Current State:** `serein-core/src/serein_core/memory.py` implements bounded working memory (max 10 items), importance classification, and database storage. `src/core/memory/` contains duplicate legacy implementations. Optional embeddings can be enabled via `sentence-transformers`, but are safely disabled on low-spec hardware (`SEREIN_ENABLE_EMBEDDINGS=0`).
+- **Public Interfaces:** `async evaluate_and_store(text, context)`, `async recall(query, context, limit) -> List[Memory]`.
+- **Dependencies:** SQLite, `dataclasses`.
+- **Classification:** **KEEP (serein-core) / REMOVE (src/core/memory)**.
+
+### 8. Emotion Engine (`serein_core/emotion.py`, `src/core/emotion/`)
+- **Responsibility:** 11-dimensional dynamic emotion model (happiness, curiosity, care, concern, pride, affection, loneliness, sadness, jealousy, possessiveness, excitement) with baseline regression and hourly decay.
+- **Current State:** Functional in `serein-core`. Maps emotions to conversational tone and avatar blendshapes. Duplicated in `src/`.
+- **Public Interfaces:** `async process_message(text, context)`, `async get_influence() -> Dict`.
+- **Database Requirements:** Single-row persistent table `emotion_state`.
+- **Classification:** **KEEP (serein-core) / REMOVE (src/core/emotion)**.
+
+### 9. Relationship Engine (`serein_core/relationship.py`, `src/core/relationship/`)
+- **Responsibility:** Tracks long-term bonding, familiarity, trust, attachment, interaction frequency, and boundary stages (Stranger → Acquaintance → Friend → Close Friend → Companion).
+- **Current State:** Fully implemented in `serein-core`. Duplicated in `src/`.
+- **Public Interfaces:** `async record_interaction(quality: float)`, `async get_influence() -> Dict`.
+- **Database Requirements:** Single-row persistent table `relationship_state`.
+- **Classification:** **KEEP (serein-core) / REMOVE (src/core/relationship)**.
+
+### 10. Growth Engine (`serein_core/growth.py`, `src/core/growth/`)
+- **Responsibility:** Adapts to user interests across 4 domains (technical, study, productivity, gaming), adjusting vocabulary and proactive assistance.
+- **Current State:** Fully implemented in `serein-core`. Duplicated in `src/`.
+- **Public Interfaces:** `async process(text, context)`, `async get_influence() -> Dict`.
+- **Database Requirements:** Single-row persistent table `growth_state`.
+- **Classification:** **KEEP (serein-core) / REMOVE (src/core/growth)**.
+
+### 11. Context Engine (`serein_core/context.py`, `src/core/context/`)
+- **Responsibility:** Non-blocking environmental awareness: system time, date, day of week, running applications, OS release, and network connectivity state.
+- **Current State:** Implements threadpool-based asynchronous internet socket checks with a 10-second TTL cache to prevent event-loop stalls. Emits `SYSTEM_STATE_CHANGED` on transition.
+- **Public Interfaces:** `get_context() -> ContextState`, `async check_internet_async() -> bool`.
+- **Dependencies:** `psutil`, `socket`, `asyncio`.
+- **Classification:** **KEEP (serein-core) / REMOVE (src/core/context)**.
+
+### 12. Agent System (`serein_core/agent.py`, `agent_engine.py`, `agent_sandbox.py`, `self_evolution.py`)
+- **Responsibility:** Task delegation, tool-use execution, coding agent tasks, and self-evolution proposals.
+- **Current State:** Split into high-level agent coordinator and container sandbox. Contains **severe security vulnerabilities**: fallback to direct host subprocess execution when Docker is absent, and unvalidated path traversal in self-evolution patch application.
+- **Public Interfaces:** `AgentEngine.execute_task(task)`, `ControlledSelfEvolution.propose_patch(...)`.
+- **Dependencies:** `docker` / host subprocesses, `difflib`.
+- **Classification:** **REFACTOR & SANDBOX** (Enforce least-privilege host boundaries or disable autonomous execution on Sony VAIO).
+
+### 13. Performance Engine (`serein_core/performance/engine.py`, `models.py`)
+- **Responsibility:** Choreographs Serein's multi-modal expressions: visemes, facial expressions, gaze targets, and body animations into timed scenes.
+- **Current State:** Well-tested and deterministic. Maps emotions to avatar blendshape intensities with strict clamping (0.0 to 1.0).
+- **Public Interfaces:** `create_scene(text, emotion, visemes) -> PerformanceScene`.
+- **Dependencies:** Pure Python.
+- **Classification:** **KEEP**.
+
+### 14. Voice Subsystem (`serein-voice/`, `serein_core/voice_engine.py`)
+- **Responsibility:** Offline audio capture, Voice Activity Detection (WebRTC VAD), wake-word detection, speech-to-text (Whisper.cpp / Vosk / MockSTT), and text-to-speech synthesis with viseme extraction (Piper TTS).
+- **Current State:** Modular backend architecture in `serein-voice/` wrapped and exposed via `serein_core/voice_engine.py` and FastAPI endpoints (`/api/voice/synthesize`, `/api/voice/transcribe`). Passes 64+ stress and adversarial tests.
+- **Public Interfaces:** `async synthesize(text) -> TTSResponse`, `async transcribe(audio_bytes) -> STTResponse`.
+- **Dependencies:** `wave`, `webrtcvad`, `openwakeword` (optional), `piper-tts`, `whisper-cli`.
+- **Resource Requirements:** Minimum tier uses Piper CPU model (~50MB RAM) and Mock/PocketSphinx STT.
+- **Classification:** **KEEP & CONSOLIDATE** (Bring `serein-voice/` into the canonical packaging).
+
+### 15. Vision Subsystem (`serein_core/vision_engine.py`, `src/vision/vision_engine.py`)
+- **Responsibility:** Screen understanding, visual context, camera capture (with explicit user consent).
+- **Current State:** Prototype stage. Contains references to `cv2`, `mss`, and `easyocr`. Heavy ML models are currently gated by hardware tier.
+- **Public Interfaces:** `async capture_screen()`, `async process_camera()`.
+- **Dependencies:** `opencv`, `easyocr`, `mss`.
+- **Resource Requirements:** Incompatible with Sony VAIO E-450. Must remain completely inactive on `minimum` tier.
+- **Security Boundaries:** Must require explicit, persistent user permission before activating camera.
+- **Classification:** **REFACTOR & GATE** (Opt-in only on `power` tier hardware).
+
+### 16. Avatar Subsystem (`serein-avatar/`, `serein-compositor/src/avatar-bridge.c`, `serein-core/src/serein_core/performance/`)
+- **Responsibility:** 3D avatar rendering, lip-sync (viseme blendshapes), emotional expressions, and animations.
+- **Current State:** Contains Unity C# scripts (`SereinAvatarController.cs`, `VisemeMapper.cs`) and VRM assets (`avatar.vrm`). Web/HTML avatar rendering is also implemented in the web UI.
+- **Public Interfaces:** UNIX Domain Socket IPC (`/tmp/serein-avatar.sock`) transmitting JSON visemes and emotion states.
+- **Classification:** **REFACTOR** (On Sony VAIO, use lightweight WebGL / 2D Canvas avatar to avoid heavy Unity 3D runtime overhead).
+
+### 17. Compositor / OS Integration (`serein-compositor/`, `weston.ini`, `serein-installer/install_artifacts_container.sh`)
+- **Responsibility:** Display server, window manager, layer-shell overlay management, kiosk mode, and input handling.
+- **Current State:** C-based Wayland compositor under `serein-compositor/` built on `wlroots`. The live installer script also includes a fallback using `weston` with an autostart kiosk script running Chromium in Wayland mode.
+- **Classification:** **REFACTOR** (Ensure clean single-compositor architecture; eliminate insecure Chromium flags).
+
+### 18. Safety / Security Subsystem (`serein_core/safety_layer.py`, `safety.py`, `auth.py`, `command_bus.py`)
+- **Responsibility:** Permission enforcement, path sanitization, command confirmation, action auditing, and user authentication.
+- **Current State:** Disconnected and incomplete. `SafetyLayer` exists with protected path definitions but is bypassed by `CommandBus`. Command bus confirmation tokens lack cryptographic binding. Default passwords and unrestricted sudo exist in installer scripts.
+- **Classification:** **REPLACE / REDESIGN** (Top priority remediation).
+
+### 19. Hardware Adaptation (`serein_core/hardware.py`, `model_manager.py`)
+- **Responsibility:** Local, offline detection of CPU, RAM, GPU, VRAM, and instruction sets (AVX/AVX2/CUDA/ROCm) to categorize system into `minimum`, `standard`, or `power` tiers and select matching runtime profiles.
+- **Current State:** Highly accurate and purely local. Uses `/proc/cpuinfo`, `sysfs`, `psutil`, and CLI checks. Correctly classifies Sony VAIO E-450 as `minimum` and HP Victus as `power`.
+- **Public Interfaces:** `get_hardware_profile() -> HardwareProfile`, `LocalModelManager.build_plan() -> RuntimePlan`.
+- **Classification:** **KEEP**.
+
+### 20. Testing Subsystem (`tests/`, `serein-core/tests/`)
+- **Responsibility:** Automated regression testing, stress testing, adversarial security checks, and hardware simulation.
+- **Current State:** Extensive (808 collected tests). High coverage of audio pipelines, SQLite persistence, and installer planning. Needs isolation fixes for subprocesses.
+- **Classification:** **KEEP & EXPAND** (Add path traversal and SSRF adversarial test cases).
+
+### 21. Documentation (`docs/`, `README.md`, `CURRENT_TASK.md`)
+- **Responsibility:** Architecture specifications, hardware profiles, persona guidelines, database schemas, and implementation roadmap.
+- **Current State:** Partially outdated; contains duplicate schema docs (`DATABASE_SCHEMA.md` vs `DB_FINAL_SCHEMA.md`) and references to deprecated components.
+- **Classification:** **REFACTOR** (Unify into canonical documentation).
+
+---
+
+## 4. Critical Security Findings (12 Verified Vulnerabilities)
+
+All 12 items have been verified directly in the tracked source code.
+
+```mermaid
+flowchart TD
+    subgraph CRITICAL_VULNERABILITIES["12 Confirmed Security Vulnerabilities"]
+        direction TB
+        V1["1. Default Credentials in Installer<br/>build_iso.sh:191 | installer_engine.py:608"]
+        V2["2. Passwordless Root Sudo<br/>build_iso.sh:195 (NOPASSWD:ALL)"]
+        V3["3. Broad Permission Defaults<br/>command_bus.py:347 | safety_layer.py:125"]
+        V4["4. Unbound Confirmation Tokens<br/>command_bus.py:513-529, 556"]
+        V5["5. Bypassed Safety Layer<br/>command_bus.py disconnected from safety_layer.py"]
+        V6["6. Browser Media Capture Bypass<br/>install_artifacts_container.sh:151-153"]
+        V7["7. Arbitrary File Deletion & Traversal<br/>command_bus.py:238, 242 (shutil.rmtree)"]
+        V8["8. Server-Side Request Forgery (SSRF)<br/>command_bus.py:311-329 (aiohttp loopback)"]
+        V9["9. Arbitrary Subprocess Execution<br/>command_bus.py:163 (launch_app unwhitelisted)"]
+        V10["10. Arbitrary Host Code Overwrite<br/>self_evolution.py:323-333 | agent_sandbox.py:205"]
+        V11["11. Plaintext Secrets & SQL Injection<br/>config.py:241-246 | database.py:280"]
+        V12["12. Silent Audit Log Suppression<br/>command_bus.py:585 (except Exception: pass)"]
+    end
+
+    classDef vulClass fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#b71c1c;
+    class V1,V2,V3,V4,V5,V6,V7,V8,V9,V10,V11,V12 vulClass;
+```
+
+### Vulnerability 1: Default Account Credentials in Installer
+- **File & Line References:**
+  - [`serein-installer/build_iso.sh:190-192`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/build_iso.sh#L190-L192):
+    ```bash
+    useradd -m -s /bin/bash -G sudo,video,audio,render,input serein
+    echo 'serein:serein' | chpasswd
+    ```
+  - [`serein-installer/installer_engine.py:607-608`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/installer_engine.py#L607-L608):
+    ```python
+    user: str = "serein",
+    password: str = "serein",
+    ```
+  - [`serein-installer/installer_engine.py:828-833`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/installer_engine.py#L828-L833): Pipes default plaintext password directly to `chpasswd`.
+- **Severity:** **CRITICAL**
+- **Impact:** Any machine installed with the ISO boots with known credentials (`serein:serein`), allowing unauthorized local or network access.
+- **Remediation:** Mandatory user-defined password prompt during installation wizard; refuse installation if password is empty or default; store hashed passwords using Argon2id/SHA-512.
+
+---
+
+### Vulnerability 2: Passwordless Unrestricted Sudo Privileges
+- **File & Line Reference:**
+  - [`serein-installer/build_iso.sh:194-196`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/build_iso.sh#L194-L196):
+    ```bash
+    mkdir -p /etc/sudoers.d
+    echo 'serein ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/serein
+    chmod 0440 /etc/sudoers.d/serein
+    ```
+- **Severity:** **CRITICAL**
+- **Impact:** Any process running under the `serein` user account (including untrusted web scripts, AI tool outputs, or compromised dependencies) can instantly escalate to root without password verification.
+- **Remediation:** Remove `NOPASSWD:ALL`. Restrict sudo to specific operational binaries (or require standard password authentication). Use Polkit policies for desktop management.
+
+---
+
+### Vulnerability 3: Permission Tiers Enabled Too Broadly & Auto-Granted
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:347`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L347):
+    `self.allowed_tiers = set(allowed_tiers) if allowed_tiers is not None else {PermissionTier.READ_ONLY}`
+  - [`serein-core/src/serein_core/safety_layer.py:125-128`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py#L125-L128):
+    ```python
+    elif level == PermissionLevel.READ and permission in ["internet", "file_access"]:
+        self._permissions[permission] = level
+        self.save_state()
+        return True
+    ```
+- **Severity:** **HIGH**
+- **Impact:** `file_access` and `internet` permissions are automatically granted upon request without user prompting.
+- **Remediation:** Permissions must require interactive user approval via secure IPC modal dialog before being persisted.
+
+---
+
+### Vulnerability 4: Confirmation Tokens Not Bound to Command and Parameters
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:513-529`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L513-L529):
+    ```python
+    if handler.requires_confirmation:
+        if confirmation_token:
+            pending = self._pending_confirmations.pop(confirmation_token, None)
+            if not pending:
+                return CommandResult(success=False, error="Invalid or expired confirmation token")
+        else:
+            token = str(uuid4())
+            self._pending_confirmations[token] = {
+                "command": command, "params": params, "handler": handler
+            }
+    ```
+  - [`serein-core/src/serein_core/command_bus.py:556`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L556):
+    `res = await handler.execute(params, confirmation=True)`
+- **Severity:** **CRITICAL**
+- **Impact:** When a valid `confirmation_token` is provided, `execute()` proceeds to execute the *currently passed* `command` and `params`, rather than verifying that they match the stored `pending["command"]` and `pending["params"]`. An attacker can request confirmation for a benign action (`read_file`), obtain a token, and supply it to execute `delete_file` with `/etc/passwd`. Additionally, tokens have no expiration timestamp (TTL).
+- **Remediation:** Bind tokens cryptographically to `HMAC_SHA256(command + canonical_json(params) + timestamp)`. Reject execution if parameters differ or if token is older than 300 seconds.
+
+---
+
+### Vulnerability 5: Safety Checks Bypassed and Subsystem Disconnected
+- **File & Line References:**
+  - [`serein-core/src/serein_core/safety_layer.py:223-232`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py#L223-L232):
+    ```python
+    def _is_protected_path(self, path: str) -> bool:
+        path_lower = path.lower()
+        for category, paths in self.PROTECTED_PATHS.items():
+            for protected in paths:
+                if protected.lower() in path_lower:
+                    return True
+        return False
+    ```
+  - [`serein-core/src/serein_core/command_bus.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py): Does **not** import or call `SafetyLayer` or `_is_protected_path`!
+- **Severity:** **CRITICAL**
+- **Impact:** `SafetyLayer` is completely bypassed during live command execution. Furthermore, `_is_protected_path` uses naive substring matching instead of path resolution (`Path.resolve()`), enabling trivial path traversal bypasses (e.g. `/home/serein/../etc/passwd`).
+- **Remediation:** Connect `SafetyLayer` directly into `CommandBus.execute()`. Implement canonical path resolution and strict boundary containment (`path.resolve().is_relative_to(...)`).
+
+---
+
+### Vulnerability 6: Browser Media Permissions Bypassed Without Consent
+- **File & Line References:**
+  - [`serein-installer/install_artifacts_container.sh:151-153`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/install_artifacts_container.sh#L151-L153):
+    ```bash
+    --autoplay-policy=no-user-gesture-required \
+    --use-fake-ui-for-media-stream \
+    --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:8080 \
+    ```
+- **Severity:** **HIGH**
+- **Impact:** `--use-fake-ui-for-media-stream` instructs Chromium to silently grant camera and microphone access without displaying any user permission prompt. Any page running in that origin can record audio and video covertly.
+- **Remediation:** Remove `--use-fake-ui-for-media-stream`. Rely on standard browser permission prompts or OS-level PipeWire/WirePlumber permission tokens.
+
+---
+
+### Vulnerability 7: Arbitrary File Operations Without Path Validation
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:133-146`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L133-L146) (`read_file`): Reads any arbitrary file path on the system with no sandbox.
+  - [`serein-core/src/serein_core/command_bus.py:214-217`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L214-L217) (`move_file`): Moves any file to any destination.
+  - [`serein-core/src/serein_core/command_bus.py:237-243`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L237-L243) (`delete_file`):
+    ```python
+    if p.is_dir():
+        if recursive:
+            shutil.rmtree(p)
+    else:
+        p.unlink()
+    ```
+- **Severity:** **CRITICAL**
+- **Impact:** Can delete entire system directories (e.g. `/etc`, `/boot`, `/home/serein`) if invoked with elevated or user permissions. Zero path containment checks exist.
+- **Remediation:** Enforce strict sandbox: allow operations only within `~/Documents/Serein` and `/tmp/serein`. Forbid operations on system directories (`/`, `/etc`, `/usr`, `/boot`, `/sys`, `/proc`).
+
+---
+
+### Vulnerability 8: Unrestricted Network Requests (SSRF)
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:311-329`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L311-L329):
+    ```python
+    async with aiohttp.ClientSession() as session:
+        async with session.request(method, url, headers=headers, json=data) as resp:
+            text = await resp.text()
+    ```
+- **Severity:** **HIGH**
+- **Impact:** Arbitrary HTTP requests can be sent to internal loopback services (`http://127.0.0.1:8000`, `http://localhost:8080`), local network devices, or cloud metadata endpoints (`http://169.254.169.254`).
+- **Remediation:** Disallow loopback, private IPv4/IPv6 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`), and enforce a domain allowlist for external calls.
+
+---
+
+### Vulnerability 9: Arbitrary Subprocess Execution & Command Injection
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:155-166`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L155-L166):
+    ```python
+    proc = await asyncio.create_subprocess_exec(app, *args)
+    ```
+  - [`serein-core/src/serein_core/agent_sandbox.py:200-213`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/agent_sandbox.py#L200-L213):
+    `proc = await asyncio.create_subprocess_exec(*cmd)` on the host when Docker is absent.
+- **Severity:** **CRITICAL**
+- **Impact:** `launch_app` accepts arbitrary binaries with arbitrary arguments. If an AI prompt outputs `launch_app(app="rm", args=["-rf", "/"])` or `launch_app(app="nc", args=["-e", "/bin/sh"])`, it is executed directly on the host operating system.
+- **Remediation:** Whitelist permissible applications (e.g. `chromium`, `alacritty`, `foot`, `mpv`) mapped to verified `.desktop` files. Prohibit passing arbitrary executable paths.
+
+---
+
+### Vulnerability 10: Unrestricted Agent Self-Modification & Host Code Overwrite
+- **File & Line References:**
+  - [`serein-core/src/serein_core/self_evolution.py:323-333`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/self_evolution.py#L323-L333):
+    ```python
+    file_path = self.repo_path / change.file_path
+    ...
+    file_path.write_text(change.new_content)
+    ```
+- **Severity:** **CRITICAL**
+- **Impact:** In Python's `pathlib.Path`, `Path("/app") / "/etc/shadow"` evaluates directly to `Path("/etc/shadow")`. There is no check verifying that `file_path.resolve()` remains inside `self.repo_path`. The self-evolution engine can overwrite any file on the system.
+- **Remediation:** Enforce `file_path.resolve().is_relative_to(self.repo_path.resolve())`. Require cryptographic signature verification or mandatory manual physical git review.
+
+---
+
+### Vulnerability 11: Secrets and Plaintext Storage & SQL Injection in PRAGMA
+- **File & Line References:**
+  - [`serein-core/src/serein_core/config.py:241-246`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/config.py#L241-L246):
+    Dumps API keys (`nvidia_api_key`, `openrouter_api_key`, `azure_speech_key`) and `encryption_key` directly to plaintext YAML without restrictive POSIX permissions (`chmod 0600`).
+  - [`serein-core/src/serein_core/database.py:280`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/database.py#L280):
+    `conn.execute(f"PRAGMA key = '{self.encryption_key}'")`
+- **Severity:** **HIGH**
+- **Impact:** World-readable configuration files expose secrets. PRAGMA key string formatting enables SQL injection if the key contains single quotes.
+- **Remediation:** Store secrets in Linux kernel keyring (`keyutils`) or `secretstorage` (Freedesktop Secret Service). Enforce `0600` permissions on config files. Parameterize or escape SQLCipher key pragmas.
+
+---
+
+### Vulnerability 12: Audit Logging Failures & Missing Security Events
+- **File & Line References:**
+  - [`serein-core/src/serein_core/command_bus.py:585-586`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L585-L586):
+    ```python
+    except Exception:
+        pass
+    ```
+  - [`serein-core/src/serein_core/command_bus.py:495-500`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L495-L500): Permission denied attempts are returned without logging to the database audit table.
+- **Severity:** **MEDIUM**
+- **Impact:** When database logging fails, exceptions are silently ignored, allowing commands to run with zero audit trail. Unauthorized access attempts leave no forensic record.
+- **Remediation:** Audit logging must be fail-secure: if the audit logger fails, destructive commands must abort. All authorization failures must be logged to a dedicated, write-ahead security log.
+
+---
+
+## 5. Runtime Lifecycle & User Interaction Pipeline Trace
+
+### Boot to Shutdown Trace
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Boot as BIOS / UEFI
+    participant Init as systemd
+    participant Comp as serein-compositor (Wayland)
+    participant Core as serein-core (Daemon)
+    participant DB as SQLite / SQLCipher
+    participant Sched as Scheduler Service
+    participant Shell as Serein Shell (Kiosk App)
+
+    Boot->>Init: Kernel bootstrap & init (quiet splash)
+    Init->>Init: agetty autologin serein (tty1)
+    Init->>Comp: Start serein-compositor.service
+    Comp->>Comp: Initialize DRM / KMS / Wayland socket
+    Init->>Core: Start serein-core.service
+    Core->>DB: Connect & run migrations
+    Core->>Sched: Initialize & load pending events from DB
+    Core->>Core: Start Voice Engine & IPC endpoints
+    Init->>Shell: Start serein-shell.service
+    Shell->>Core: WebSocket connect (/ws) & check status
+    Core->>Shell: Send boot greeting & avatar emotion state
+    Note over Shell,Core: System in ACTIVE loop
+    Init->>Core: SIGTERM / SIGINT signal
+    Core->>Sched: Cancel scheduler loop & persist state
+    Core->>DB: Flush WAL & close database
+    Core->>Init: Clean exit (code 0)
+```
+
+### Complete User Interaction Pipeline Trace
+
+```mermaid
+flowchart TD
+    UI[User Input: Speech or Text] --> V[Voice STT / WebAPI /ws]
+    V --> I[Intent Classifier]
+    I --> C[Context Engine: System / Network / Time]
+    C --> D[Decision Engine]
+    D --> S{Safety Gate}
+    
+    S -- Blocked --> BL[Block Response & Audit Log]
+    S -- Needs Confirm --> CF[Generate Bound Token & Prompt User]
+    CF --> UCA[User Confirms via Modal]
+    
+    S -- Allowed / Confirmed --> CB[Command Bus / OS Control]
+    D -- Chit-Chat / Knowledge --> LB[Local Brain / Router]
+    D -- Reminder --> SC[Scheduler Engine]
+    
+    CB --> EX[System Execution: Whitelisted App / Setting]
+    EX --> AR[Action Result]
+    LB --> BR[Brain Response]
+    SC --> SR[Scheduled Event ID]
+    
+    AR & BR & SR --> MEM[Memory Engine: Working / Semantic / Dialogue]
+    MEM --> EMO[Emotion & Relationship Updates]
+    EMO --> PERF[Performance Engine: Visemes & Mood]
+    PERF --> OUT[TTS Audio + Avatar Blendshape Stream]
+```
+
+### Trace Integrity Analysis
+- **Where the pipeline works:** Speech transcription, viseme mapping, intent classification, decision routing, and SQLite dialogue saving work reliably.
+- **Where the pipeline breaks:**
+  1. `CommandBus` does not call `SafetyLayer`. Safety checks are split between two separate subsystems that never interact.
+  2. Subprocess execution in `command_bus.py:163` (`launch_app`) is invoked synchronously without verifying whether the target environment can spawn the process, causing test and daemon hangs on Windows Python 3.14.
+  3. Confirmation tokens can be intercepted or reused with mutated parameters.
+
+---
+
+## 6. Dependency, Packaging & Hardware Compatibility
+
+### The Sony VAIO Constraint Matrix
+- **CPU:** AMD E-450 (2 cores, 2 threads, 1.65 GHz, **NO AVX**, **NO AVX2**, SSE4a only)
+- **RAM:** 16GB DDR3
+- **GPU:** AMD Radeon HD 6320 (integrated, TeraScale 2 architecture, OpenGL 3.3, OpenCL 1.1, **NO ROCm**, **NO Vulkan**)
+- **Storage:** 256GB SATA SSD
+
+### Critical Packaging Incompatibilities in `serein-core/pyproject.toml`
+The current `pyproject.toml` lists dependencies that will crash or fail to install on the Sony VAIO:
+1. `torch>=2.1.0`: Modern PyTorch wheels require AVX. On an AMD E-450, importing `torch` results in an immediate **`Illegal instruction (core dumped)`**.
+2. `transformers>=4.36.0`, `sentence-transformers>=2.2.2`, `accelerate>=0.25.0`: All depend on PyTorch.
+3. `easyocr>=1.7.1`, `opencv-python-headless>=4.8.1`: Consume excessive disk space (~1.5GB) and CPU cycles.
+
+### Required Packaging Fix
+- Strip heavy ML dependencies from `serein-core` core requirements.
+- Make `torch`, `transformers`, and `vision` strictly optional extras (`[project.optional-dependencies]`).
+- For the Sony VAIO: Use **pure Python deterministic brain**, **`piper-tts` CPU build**, and **`whisper.cpp` compiled for generic x86_64 without AVX**.
+- For the HP Victus: Allow `llama-cpp-python` with CUDA acceleration for RTX 3050.
+
+---
+
+## 7. Installer and Boot Posture
+
+### Installer Issues
+1. **Directory Duplication:** [`serein-installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer) and [`serein_installer/`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein_installer) contain identical copies of `installer_engine.py`. `serein_installer/` must be removed.
+2. **Hardcoded User Credentials:** `build_iso.sh:191` and `installer_engine.py:608` write `serein:serein`.
+3. **Hardcoded Hostname:** `serein-vaio` is hardcoded as default in `installer_engine.py:609`.
+4. **Partition Layout:** `installer_engine.py` supports UEFI and BIOS GPT/MBR layouts, min disk size validation (20GB), and dry-run execution. This logic is sound and tested.
+5. **Plymouth Theme:** `serein-glow` theme assets are complete in `serein-installer/plymouth/serein-glow/`.
+
+---
+
+## 8. Empirical Test Suite Results & Limitations
+
+Testing was executed in the workspace using Python 3.14.3 with `pytest-8.2.2` and `pytest-asyncio-0.24.0`.
+
+### Test Summary
+
+| Test Directory / Suite | Total Tests | Passed | Failed | Skipped | Status / Note |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| `tests/` (Adversarial, Stress, Milestones) | 446 | **446** | 0 | 0 | **100% Pass** (19.06s + 7.65s + 23.57s) |
+| `serein-core/tests/` (Unit, Subsystems, Hardware, Voice) | 207 | **207** | 0 | 0 | **100% Pass** (when run in isolated batches) |
+| **Combined Monolithic Run (`pytest -q`)** | 808 collected | 114 | 0 | 0 | **Stalls at Test 115** |
+
+### Root Cause of Monolithic Test Stall
+In [`serein-core/tests/test_m2_brain.py:309`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_m2_brain.py#L309):
+```python
+res = await serein_core.process_input("open terminal", user_confirmation=True)
+```
+This test does not mock `CommandBus.execute()`. `process_input()` routes "open terminal" to `command_bus.execute("launch_app", {"app": "terminal"})`, which directly invokes `asyncio.create_subprocess_exec("terminal")` on the real host system. When preceding tests modify the asyncio event loop policy, this call hangs the test runner.
+
+---
+
+## 9. Keep / Refactor / Replace / Remove Classification Matrix
+
+| File / Component | Category | Rationale & Action Plan |
+| :--- | :---: | :--- |
+| `src/*` (Entire directory) | **REMOVE** | Monolithic legacy prototype. All modern logic resides in `serein-core`. Migrate any remaining persona prompts to `serein-core`, then delete. |
+| `serein_installer/*` | **REMOVE** | Exact duplicate copy of `serein-installer/`. |
+| `main.py` (root) | **REMOVE** | References legacy `src.serein_compat`. Canonical entry point is `serein_core/__main__.py`. |
+| `check_db.py`, `update_schema.py` | **REMOVE** | Ad-hoc scratch scripts. SQLite migrations are built into `serein_core/database.py`. |
+| `SereinOS_cleanup.ps1` | **REMOVE** | Obsolete base64 bootstrap script. |
+| `docs/DB_FINAL_SCHEMA.md` | **REMOVE** | Redundant duplicate of `docs/DATABASE_SCHEMA.md`. |
+| `docs/SereinOS_PRD_v1.0.docx` | **REPLACE** | Binary DOCX file. Convert essential PRD text into clean Markdown. |
+| `serein-installer/build_iso.sh` | **REFACTOR** | Fix default password `serein:serein`, remove `NOPASSWD:ALL`, fix kiosk flags. |
+| `serein-installer/installer_engine.py` | **REFACTOR** | Remove default password string; enforce user-supplied password in wizard. |
+| `serein-core/src/serein_core/command_bus.py` | **REPLACE** | Rewrite with cryptographic token binding, canonical path sandbox, and SSRF filter. |
+| `serein-core/src/serein_core/safety_layer.py` | **REFACTOR** | Integrate directly into `CommandBus`; replace substring matching with `is_relative_to`. |
+| `serein-core/src/serein_core/agent_sandbox.py` | **REFACTOR** | Disallow unisolated host execution when containers are unavailable. |
+| `serein-core/src/serein_core/self_evolution.py` | **REFACTOR** | Enforce path sandboxing; prevent writes outside repo directory. |
+| `serein-core/src/serein_core/config.py` | **REFACTOR** | Enforce 0600 file permissions; mask secrets; fix Pydantic v2 `ConfigDict` warnings. |
+| `serein-core/src/serein_core/database.py` | **KEEP** | Robust async SQLite layer; fix PRAGMA key string formatting. |
+| `serein-core/src/serein_core/hardware.py` | **KEEP** | Accurate, local, zero-cloud tier classifier. |
+| `serein-core/src/serein_core/local_brain.py` | **KEEP** | Essential offline deterministic engine for Sony VAIO E-450. |
+| `serein-core/src/serein_core/ai.py` | **KEEP** | BrainRouter with zero-crash offline fallback. |
+| `serein-core/src/serein_core/intent/*` | **KEEP** | Fast, ReDoS-safe intent classification. |
+| `serein-core/src/serein_core/decision.py` | **KEEP** | Accurate policy routing. |
+| `serein-core/src/serein_core/scheduler.py` | **KEEP** | Persistent SQLite-backed task scheduler. |
+| `serein-core/src/serein_core/memory.py` | **KEEP** | Bounded working memory and database persistence. |
+| `serein-core/src/serein_core/emotion.py` | **KEEP** | 11-dimension emotional state with decay. |
+| `serein-core/src/serein_core/relationship.py` | **KEEP** | Long-term bonding model. |
+| `serein-core/src/serein_core/growth.py` | **KEEP** | User interest adaptation. |
+| `serein-core/src/serein_core/context.py` | **KEEP** | Non-blocking system context engine. |
+| `serein-core/src/serein_core/performance/*` | **KEEP** | Viseme and performance choreographing. |
+| `serein-voice/*` | **KEEP** | Voice engine with VAD, wake word, Piper TTS, and Whisper STT. |
+| `serein-compositor/*` | **KEEP** | C-based Wayland compositor. |
+| `serein-avatar/*` | **KEEP** | Avatar assets and viseme controllers. |
+| `deploy/systemd/*` | **KEEP** | Systemd unit configurations. |
