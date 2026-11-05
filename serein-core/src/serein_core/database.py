@@ -275,9 +275,13 @@ class Database:
     
     def _create_connection(self) -> sqlite3.Connection:
         if self.encryption_key and sqlcipher is not None:
+            # Prevent SQL injection in PRAGMA key
+            if any(c in self.encryption_key for c in ("'", ";", "\0", "\n", "\r", "--")):
+                raise ValueError("Invalid characters in encryption_key: potential SQL injection detected")
+            escaped_key = self.encryption_key.replace("'", "''")
             conn = sqlcipher.connect(str(self.path), check_same_thread=False)
             conn.isolation_level = None
-            conn.execute(f"PRAGMA key = '{self.encryption_key}'")
+            conn.execute(f"PRAGMA key = '{escaped_key}'")
             conn.execute("PRAGMA cipher_page_size = 4096")
             conn.execute("PRAGMA kdf_iter = 256000")
             conn.execute("PRAGMA cipher_hmac_algorithm = HMAC_SHA512")

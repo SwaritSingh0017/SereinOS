@@ -118,22 +118,17 @@ class SafetyLayer(BaseEngine):
         return current.value >= required.value
     
     def request_permission(self, permission: str, level: PermissionLevel, reason: str) -> bool:
-        """Requests a permission (in real implementation, would prompt user)."""
-        # For now, auto-approve safe requests, deny dangerous ones
+        """Requests a permission. Requires explicit approval for all non-NONE access."""
         if level == PermissionLevel.NONE:
             return True
-        elif level == PermissionLevel.READ and permission in ["internet", "file_access"]:
-            self._permissions[permission] = level
-            self.save_state()
-            return True
-        else:
-            # Would prompt user in real implementation
-            event_bus.emit("safety.permission_requested", {
-                "permission": permission,
-                "level": level.name,
-                "reason": reason
-            })
-            return False
+        
+        # Do not auto-grant file_access or internet without user approval
+        event_bus.emit("safety.permission_requested", {
+            "permission": permission,
+            "level": level.name,
+            "reason": reason
+        })
+        return False
     
     def validate_action(self, action: str, params: Dict = None) -> Dict[str, Any]:
         """
@@ -146,7 +141,7 @@ class SafetyLayer(BaseEngine):
         risk = self.PROTECTED_ACTIONS.get(action, ActionRisk.NONE)
         
         # Check protected paths for file operations
-        if action in ["file_delete", "file_modify", "file_create"]:
+        if action in ["file_read", "file_delete", "file_modify", "file_create"]:
             path = params.get("path", "")
             if self._is_protected_path(path):
                 return {
@@ -221,12 +216,51 @@ class SafetyLayer(BaseEngine):
         }
     
     def _is_protected_path(self, path: str) -> bool:
-        """Checks if a path is in protected directories."""
-        path_lower = path.lower()
+        """Checks if a path is in protected directories using canonical path resolution."""
+        if not path or not str(path).strip():
+            return True
         
+        try:
+            from pathlib import Path
+            resolved = Path(path).expanduser().resolve()
+        except Exception:
+            return True
+        
+        # Prohibit system root
+        if resolved.parent == resolved:
+            return True
+
+        system_roots = [
+            Path("/bin"), Path("/sbin"), Path("/usr"), Path("/etc"),
+            Path("/boot"), Path("/sys"), Path("/proc"), Path("/dev"), Path("/root"),
+            Path("/windows"), Path("/system32"), Path("/program files"),
+        ]
+        sensitive_roots = [
+            Path("~/.ssh").expanduser().resolve(),
+            Path("~/.gnupg").expanduser().resolve(),
+            Path("~/.aws").expanduser().resolve(),
+            Path("~/.config").expanduser().resolve(),
+        ]
+        
+        for root in system_roots:
+            try:
+                if resolved == root or resolved.is_relative_to(root):
+                    return True
+            except Exception:
+                pass
+                
+        for s_root in sensitive_roots:
+            try:
+                if resolved == s_root or resolved.is_relative_to(s_root):
+                    return True
+            except Exception:
+                pass
+
+        resolved_str = str(resolved).lower().replace("\\", "/")
         for category, paths in self.PROTECTED_PATHS.items():
             for protected in paths:
-                if protected.lower() in path_lower:
+                prot_norm = protected.lower().replace("\\", "/").strip("/")
+                if f"/{prot_norm}" in resolved_str or resolved_str.endswith(f"/{prot_norm}") or prot_norm == resolved_str:
                     return True
         
         return False

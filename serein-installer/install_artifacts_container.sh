@@ -149,8 +149,6 @@ exec chromium \
     --overscroll-history-navigation=0 \
     --disable-features=Translate,OptimizationHints \
     --autoplay-policy=no-user-gesture-required \
-    --use-fake-ui-for-media-stream \
-    --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:8080 \
     --user-data-dir=/home/serein/.config/chromium-kiosk
 DESK_EOF
 chmod +x /build/chroot/usr/local/bin/serein-desktop

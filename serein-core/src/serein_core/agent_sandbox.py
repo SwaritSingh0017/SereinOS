@@ -196,9 +196,14 @@ USER sandbox
         if sandbox["type"] == "docker":
             container_id = sandbox["container_id"]
             cmd = ["docker", "exec", "-i", container_id] + command
+        elif sandbox["type"] == "podman":
+            container_id = sandbox["container_id"]
+            cmd = ["podman", "exec", "-i", container_id] + command
         else:
-            # Local execution
-            cmd = command
+            # Direct host subprocess execution is strictly disabled when container isolation is unavailable
+            raise PermissionError(
+                f"Host execution disabled: Sandbox {sandbox_id} lacks container isolation (Docker/Podman required)."
+            )
         
         try:
             proc = await asyncio.wait_for(

@@ -605,7 +605,7 @@ class InstallerEngine:
         self,
         disk_device: str,
         user: str = "serein",
-        password: str = "serein",
+        password: Optional[str] = None,
         hostname: str = "serein-vaio",
         firmware_type: str = "auto",
         scheme: str = "auto",
@@ -621,6 +621,20 @@ class InstallerEngine:
             raise ValueError(f"Invalid hostname: '{hostname}'")
         if not USERNAME_REGEX.match(user):
             raise ValueError(f"Invalid username: '{user}'")
+
+        is_non_root = (os.getuid() != 0) if hasattr(os, "getuid") else True
+        if not dry_run and not is_non_root:
+            if not password:
+                raise ValueError("Password is required for target system installation and cannot be empty")
+            if password.strip().lower() in ("serein", "password", "admin", "123456", "12345678"):
+                raise ValueError("Insecure default password is prohibited. Please choose a strong password.")
+            if len(password) < 8:
+                raise ValueError("Password must be at least 8 characters long.")
+        elif password is not None:
+            if password.strip().lower() in ("serein", "password", "admin", "123456", "12345678"):
+                raise ValueError("Insecure default password is prohibited. Please choose a strong password.")
+            if len(password) < 8:
+                raise ValueError("Password must be at least 8 characters long.")
 
         with self._lock:
             if self._progress.phase not in ("idle", "complete", "failed") and not self._progress.done:

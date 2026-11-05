@@ -320,11 +320,20 @@ class PatchApplier:
             
             # Apply each change
             for change in patch.changes:
-                file_path = self.repo_path / change.file_path
+                raw_path = Path(change.file_path)
+                if raw_path.is_absolute():
+                    raise ValueError(f"Absolute path in patch is forbidden: {change.file_path}")
+                
+                resolved_target = (self.repo_path / raw_path).resolve()
+                repo_root_resolved = self.repo_path.resolve()
+                if not resolved_target.is_relative_to(repo_root_resolved):
+                    raise ValueError(f"Path traversal detected in patch: {change.file_path} escapes {self.repo_path}")
+                
+                file_path = resolved_target
                 
                 # Backup original
                 if file_path.exists():
-                    backup_path = backup_dir / change.file_path
+                    backup_path = backup_dir / raw_path
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(file_path, backup_path)
                 

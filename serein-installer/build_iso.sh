@@ -188,11 +188,13 @@ systemctl enable dbus 2>/dev/null || true
 echo '[INFO] Creating default serein user and permissions...'
 if ! id -u serein >/dev/null 2>&1; then
     useradd -m -s /bin/bash -G sudo,video,audio,render,input serein
-    echo 'serein:serein' | chpasswd
+    # Do NOT set a hardcoded default password. Account is locked until installer prompts user.
+    passwd -l serein 2>/dev/null || true
 fi
 
 mkdir -p /etc/sudoers.d
-echo 'serein ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/serein
+# Restrict sudo: Require standard authentication, zero unrestricted NOPASSWD privileges
+echo '%sudo ALL=(ALL:ALL) ALL' > /etc/sudoers.d/serein
 chmod 0440 /etc/sudoers.d/serein
 
 mkdir -p /etc/systemd/system/getty@tty1.service.d

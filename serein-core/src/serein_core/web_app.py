@@ -143,7 +143,7 @@ class InstallerInstallRequest(BaseModel):
     disk: str = Field(..., max_length=128, pattern=r"^/dev/(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|mmcblk[0-9]+)$")
     scheme: Optional[str] = "auto"
     user: Optional[str] = Field("serein", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
-    password: Optional[str] = "serein"
+    password: Optional[str] = None
     hostname: Optional[str] = Field("serein-pc", pattern=r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$")
     firmware_type: Optional[str] = "auto"
 
@@ -1139,7 +1139,7 @@ async def post_installer_install(req: InstallerInstallRequest):
         task_id = installer_engine.start_installation(
             disk_device=req.disk,
             user=req.user or "serein",
-            password=req.password or "serein",
+            password=req.password,
             hostname=req.hostname or "serein-pc",
             firmware_type=req.firmware_type or "auto",
             scheme=req.scheme or "auto",

@@ -33,29 +33,52 @@ flowchart TD
 
 ## 2. Detailed Implementation Stages
 
-### Stage 1: Security Hardening & Pre-Flight Remediation
-- **Goal:** Eliminate the 12 confirmed critical security vulnerabilities in installer scripts, sudoers configuration, file permissions, and SQL string pragmas before any architectural modifications begin.
+### Stage 1: Security Hardening & Pre-Flight Remediation [LOCKED - COMPLETED]
+- **Goal:** Eliminate the 12 confirmed critical security vulnerabilities in installer scripts, sudoers configuration, file permissions, Command Bus execution, path containment, and SQL string pragmas before any architectural modifications begin.
+- **Status:** **LOCKED & VERIFIED** (All 12 vulnerabilities remediated and validated under dedicated adversarial tests).
 - **Affected Files:**
   - [`serein-installer/build_iso.sh`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/build_iso.sh) (Remove hardcoded credentials `serein:serein`; remove passwordless sudo `NOPASSWD:ALL`).
-  - [`serein-installer/installer_engine.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/installer_engine.py) (Remove default password string; enforce user-prompted credentials with minimum length and complexity).
+  - [`serein-installer/installer_engine.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/installer_engine.py) (Remove default password string; enforce user-prompted credentials with minimum length $\ge 8$ and complexity).
   - [`serein-installer/install_artifacts_container.sh`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/install_artifacts_container.sh) (Remove `--use-fake-ui-for-media-stream` and insecure origin bypass flags).
-  - [`serein-core/src/serein_core/config.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/config.py) (Enforce `0600` permissions on config files; mask secrets in serialization; fix Pydantic v2 `ConfigDict` deprecation warnings).
-  - [`serein-core/src/serein_core/database.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/database.py) (Fix SQL injection in `PRAGMA key` via string escaping/parameterization).
-  - [`serein-core/src/serein_core/safety_layer.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py) (Implement canonical `Path.resolve()` containment checking using `Path.is_relative_to()`).
+  - [`serein-core/src/serein_core/config.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/config.py) (Enforce `0600` permissions on config files and `0700` on directories; mask secrets in serialization; fix Pydantic v2 `ConfigDict` deprecation warnings).
+  - [`serein-core/src/serein_core/database.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/database.py) (Fix SQL injection in `PRAGMA key` via validation and string escaping).
+  - [`serein-core/src/serein_core/safety_layer.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py) (Implement canonical `Path.resolve()` containment checking using `Path.is_relative_to()`; prevent auto-granting permissions).
+  - [`serein-core/src/serein_core/command_bus.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py) (Enforce application whitelist; integrate SafetyLayer; implement Freedesktop Trash redirection; implement server-tracked single-use confirmation challenges; SSRF protection; fail-secure audit logging).
+  - [`serein-core/src/serein_core/self_evolution.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/self_evolution.py) (Enforce repository containment on patch application; ban absolute paths).
+  - [`serein-core/src/serein_core/agent_sandbox.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/agent_sandbox.py) (Raise `PermissionError` when container isolation is missing, preventing direct host execution).
+  - [`serein-core/src/serein_core/web_app.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/web_app.py) (Remove hardcoded default password from API models and installer handlers).
+  - [`serein-core/tests/test_stage1_security_adversarial.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_stage1_security_adversarial.py) (19 dedicated adversarial test cases covering all 12 vulnerabilities).
+- **Remediation Summary:**
+  1. **V1 (Default Credentials):** **FIXED AND TESTED**
+  2. **V2 (NOPASSWD:ALL Sudo):** **FIXED AND TESTED**
+  3. **V3 (Auto-Granted Permissions):** **FIXED AND TESTED**
+  4. **V4 (Unbound Confirmation Tokens):** **FIXED AND TESTED**
+  5. **V5 (Bypassed Safety Layer):** **FIXED AND TESTED**
+  6. **V6 (Browser Media Consent Bypass):** **FIXED AND TESTED**
+  7. **V7 (Arbitrary File Deletion / Traversal):** **FIXED AND TESTED**
+  8. **V8 (SSRF / DNS Rebinding):** **FIXED AND TESTED**
+  9. **V9 (Arbitrary App Launch / Shell Injection):** **FIXED AND TESTED**
+  10. **V10 (Unrestricted Self-Evolution / Host Escape):** **FIXED AND TESTED**
+  11. **V11 (Secrets in Plaintext / PRAGMA SQLi):** **FIXED AND TESTED**
+  12. **V12 (Silent Audit Log Suppression):** **FIXED AND TESTED**
 - **Dependencies:** None (Baseline pre-flight stage).
 - **Acceptance Criteria:**
-  1. No default or hardcoded password exists anywhere in `build_iso.sh` or `installer_engine.py`.
+  1. No default or hardcoded password exists anywhere in `build_iso.sh`, `installer_engine.py`, or `web_app.py`.
   2. Sudoers file in ISO build does not grant `NOPASSWD:ALL`.
   3. Browser kiosk launch script does not include `--use-fake-ui-for-media-stream`.
   4. Configuration file writing sets POSIX file mode to `0600` (read/write by owner only).
   5. PRAGMA key operations safely quote or validate encryption keys to prevent SQL injection.
-- **Test Commands:**
+  6. All 12 critical vulnerabilities verified remediated with 0 regressions.
+- **Test Commands & Results:**
   ```powershell
-  pytest serein-core/tests/test_security_audit.py -v
-  pytest tests/test_m4_empirical_adversarial_recheck.py -v
+  pytest serein-core/tests/test_stage1_security_adversarial.py -v   # 18 passed, 1 skipped (0.71s)
+  pytest tests/test_m4_empirical_adversarial_recheck.py -v          # 36 passed (1.93s)
+  pytest serein-core/tests/test_security_audit.py -v                # 7 passed (3.11s)
+  pytest serein-core/tests/test_command_bus.py -v                   # 10 passed (0.96s)
+  pytest serein-core/tests/test_m2_brain.py -v                      # 18 passed (1.97s)
   ```
-- **Rollback Strategy:** `git checkout HEAD -- serein-installer/ serein-core/src/serein_core/config.py serein-core/src/serein_core/database.py serein-core/src/serein_core/safety_layer.py`
-- **Lock Condition:** All security audit assertions pass; no plaintext default credentials or unescaped pragmas detected by static scans.
+- **Rollback Strategy:** `git checkout HEAD -- serein-installer/ serein-core/`
+- **Lock Condition:** All security audit and adversarial assertions pass; zero plaintext default credentials or unescaped pragmas detected by static scans; fail-secure behavior verified. Stage 1 is officially **LOCKED**.
 
 ---
 

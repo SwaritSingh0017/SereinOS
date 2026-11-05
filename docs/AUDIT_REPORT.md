@@ -220,31 +220,49 @@ Total tracked files: **220** (verified via `git ls-files`)
 
 ## 4. Critical Security Findings (12 Verified Vulnerabilities)
 
-All 12 items have been verified directly in the tracked source code.
+All 12 items have been verified directly in the tracked source code and remediated during Stage 1 implementation.
+
+### Stage 1 Security Hardening Status Matrix
+
+| ID | Vulnerability Description | Severity | Stage 1 Status | Verification / Evidence |
+| :--- | :--- | :---: | :---: | :--- |
+| **V1** | Default Account Credentials in Installer (`serein:serein`) | CRITICAL | **FIXED AND TESTED** | `build_iso.sh` locks default account; `installer_engine.py` removes default password, enforces min length $\ge 8$, blocks trivial passwords; verified by `test_m4_empirical_adversarial_recheck.py`. |
+| **V2** | Passwordless Root Sudo (`NOPASSWD:ALL`) | CRITICAL | **FIXED AND TESTED** | Removed from `build_iso.sh`; replaced with standard `%sudo ALL=(ALL:ALL) ALL`; verified by `test_m4_empirical_adversarial_recheck.py`. |
+| **V3** | Permission Tiers Auto-Granted in SafetyLayer | HIGH | **FIXED AND TESTED** | `safety_layer.py:request_permission()` no longer auto-grants permissions; returns `False` pending explicit UI confirmation; verified by `test_stage1_security_adversarial.py`. |
+| **V4** | Unbound Stateless Confirmation Tokens | CRITICAL | **FIXED AND TESTED** | Replaced with server-tracked challenges with 300s TTL, canonical JSON SHA-256 parameter hashing, and atomic consumption; verified by `test_stage1_security_adversarial.py`. |
+| **V5** | Bypassed Safety Layer & Subsystem Disconnect | CRITICAL | **FIXED AND TESTED** | `command_bus.py` now enforces `safety_layer.validate_action()`; `safety_layer.py` uses canonical `Path.resolve()` containment checking; verified by `test_command_bus_enforces_safety_layer`. |
+| **V6** | Browser Media Consent Bypass (`--use-fake-ui-for-media-stream`) | HIGH | **FIXED AND TESTED** | Removed bypass flags from `install_artifacts_container.sh`; verified by `test_install_artifacts_container_script_stages_plymouth_and_installer`. |
+| **V7** | Arbitrary File Operations & Unchecked Traversal | CRITICAL | **FIXED AND TESTED** | `validate_safe_path()` resolves canonical paths, blocks traversal (`../`), symlink escapes, system roots; user deletions redirect to Freedesktop Trash; verified by `test_stage1_security_adversarial.py`. |
+| **V8** | Server-Side Request Forgery (SSRF) & DNS Rebinding | HIGH | **FIXED AND TESTED** | `command_bus.network_request` performs DNS pre-flight checking, blocking loopback, link-local, private RFC1918 CIDRs, and reserved IPs; verified by `test_stage1_security_adversarial.py`. |
+| **V9** | Arbitrary Subprocess Launch & Command Injection | CRITICAL | **FIXED AND TESTED** | Strict `APPROVED_APPLICATIONS` whitelist enforced; shell metacharacters rejected; arbitrary binaries blocked; verified by `test_stage1_security_adversarial.py`. |
+| **V10** | Unrestricted Self-Evolution & Host Overwrites | CRITICAL | **FIXED AND TESTED** | `self_evolution.py` enforces canonical `is_relative_to(repo_root)` validation and bans absolute paths; `agent_sandbox.py` strictly raises `PermissionError` without Docker/Podman; verified by `test_stage1_security_adversarial.py`. |
+| **V11** | Secrets in World-Readable Files & PRAGMA SQLi | HIGH | **FIXED AND TESTED** | `config.py` enforces `0600` permissions on secret files and `0700` on directories, masks API keys; `database.py` validates and escapes encryption key; verified by `test_stage1_security_adversarial.py`. |
+| **V12** | Silent Audit Log Suppression & Missing Forensic Record | MEDIUM | **FIXED AND TESTED** | `command_bus._log_audit()` fails closed for sensitive/destructive operations if audit logging fails (`Security audit failure: action aborted`); denied actions logged; verified by `test_destructive_action_fails_closed_when_audit_fails`. |
 
 ```mermaid
 flowchart TD
-    subgraph CRITICAL_VULNERABILITIES["12 Confirmed Security Vulnerabilities"]
+    subgraph REMEDIATED_VULNERABILITIES["12 Remediated Security Vulnerabilities (Stage 1 Locked)"]
         direction TB
-        V1["1. Default Credentials in Installer<br/>build_iso.sh:191 | installer_engine.py:608"]
-        V2["2. Passwordless Root Sudo<br/>build_iso.sh:195 (NOPASSWD:ALL)"]
-        V3["3. Broad Permission Defaults<br/>command_bus.py:347 | safety_layer.py:125"]
-        V4["4. Unbound Confirmation Tokens<br/>command_bus.py:513-529, 556"]
-        V5["5. Bypassed Safety Layer<br/>command_bus.py disconnected from safety_layer.py"]
-        V6["6. Browser Media Capture Bypass<br/>install_artifacts_container.sh:151-153"]
-        V7["7. Arbitrary File Deletion & Traversal<br/>command_bus.py:238, 242 (shutil.rmtree)"]
-        V8["8. Server-Side Request Forgery (SSRF)<br/>command_bus.py:311-329 (aiohttp loopback)"]
-        V9["9. Arbitrary Subprocess Execution<br/>command_bus.py:163 (launch_app unwhitelisted)"]
-        V10["10. Arbitrary Host Code Overwrite<br/>self_evolution.py:323-333 | agent_sandbox.py:205"]
-        V11["11. Plaintext Secrets & SQL Injection<br/>config.py:241-246 | database.py:280"]
-        V12["12. Silent Audit Log Suppression<br/>command_bus.py:585 (except Exception: pass)"]
+        V1["1. Default Credentials in Installer<br/>[FIXED AND TESTED]"]
+        V2["2. Passwordless Root Sudo<br/>[FIXED AND TESTED]"]
+        V3["3. Broad Permission Defaults<br/>[FIXED AND TESTED]"]
+        V4["4. Unbound Confirmation Tokens<br/>[FIXED AND TESTED]"]
+        V5["5. Bypassed Safety Layer<br/>[FIXED AND TESTED]"]
+        V6["6. Browser Media Capture Bypass<br/>[FIXED AND TESTED]"]
+        V7["7. Arbitrary File Deletion & Traversal<br/>[FIXED AND TESTED]"]
+        V8["8. Server-Side Request Forgery (SSRF)<br/>[FIXED AND TESTED]"]
+        V9["9. Arbitrary Subprocess Execution<br/>[FIXED AND TESTED]"]
+        V10["10. Arbitrary Host Code Overwrite<br/>[FIXED AND TESTED]"]
+        V11["11. Plaintext Secrets & SQL Injection<br/>[FIXED AND TESTED]"]
+        V12["12. Silent Audit Log Suppression<br/>[FIXED AND TESTED]"]
     end
 
-    classDef vulClass fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#b71c1c;
-    class V1,V2,V3,V4,V5,V6,V7,V8,V9,V10,V11,V12 vulClass;
+    classDef fixedClass fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
+    class V1,V2,V3,V4,V5,V6,V7,V8,V9,V10,V11,V12 fixedClass;
 ```
 
 ### Vulnerability 1: Default Account Credentials in Installer
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-installer/build_iso.sh:190-192`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/build_iso.sh#L190-L192):
     ```bash
@@ -264,6 +282,7 @@ flowchart TD
 ---
 
 ### Vulnerability 2: Passwordless Unrestricted Sudo Privileges
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line Reference:**
   - [`serein-installer/build_iso.sh:194-196`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/build_iso.sh#L194-L196):
     ```bash
@@ -278,6 +297,7 @@ flowchart TD
 ---
 
 ### Vulnerability 3: Permission Tiers Enabled Too Broadly & Auto-Granted
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:347`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L347):
     `self.allowed_tiers = set(allowed_tiers) if allowed_tiers is not None else {PermissionTier.READ_ONLY}`
@@ -295,6 +315,7 @@ flowchart TD
 ---
 
 ### Vulnerability 4: Confirmation Tokens Not Bound to Command and Parameters
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:513-529`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L513-L529):
     ```python
@@ -318,6 +339,7 @@ flowchart TD
 ---
 
 ### Vulnerability 5: Safety Checks Bypassed and Subsystem Disconnected
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/safety_layer.py:223-232`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py#L223-L232):
     ```python
@@ -337,6 +359,7 @@ flowchart TD
 ---
 
 ### Vulnerability 6: Browser Media Permissions Bypassed Without Consent
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-installer/install_artifacts_container.sh:151-153`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-installer/install_artifacts_container.sh#L151-L153):
     ```bash
@@ -351,6 +374,7 @@ flowchart TD
 ---
 
 ### Vulnerability 7: Arbitrary File Operations Without Path Validation
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:133-146`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L133-L146) (`read_file`): Reads any arbitrary file path on the system with no sandbox.
   - [`serein-core/src/serein_core/command_bus.py:214-217`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L214-L217) (`move_file`): Moves any file to any destination.
@@ -369,6 +393,7 @@ flowchart TD
 ---
 
 ### Vulnerability 8: Unrestricted Network Requests (SSRF)
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:311-329`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L311-L329):
     ```python
@@ -383,6 +408,7 @@ flowchart TD
 ---
 
 ### Vulnerability 9: Arbitrary Subprocess Execution & Command Injection
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:155-166`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L155-L166):
     ```python
@@ -397,6 +423,7 @@ flowchart TD
 ---
 
 ### Vulnerability 10: Unrestricted Agent Self-Modification & Host Code Overwrite
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/self_evolution.py:323-333`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/self_evolution.py#L323-L333):
     ```python
@@ -411,6 +438,7 @@ flowchart TD
 ---
 
 ### Vulnerability 11: Secrets and Plaintext Storage & SQL Injection in PRAGMA
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/config.py:241-246`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/config.py#L241-L246):
     Dumps API keys (`nvidia_api_key`, `openrouter_api_key`, `azure_speech_key`) and `encryption_key` directly to plaintext YAML without restrictive POSIX permissions (`chmod 0600`).
@@ -423,6 +451,7 @@ flowchart TD
 ---
 
 ### Vulnerability 12: Audit Logging Failures & Missing Security Events
+- **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:585-586`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L585-L586):
     ```python

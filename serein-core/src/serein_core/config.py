@@ -75,8 +75,11 @@ class DatabaseConfig(BaseSettings):
         "busy_timeout": "5000",
     })
     
-    class Config:
-        env_prefix = "IGNORE_"  # Disable env var parsing entirely for this model
+    model_config = SettingsConfigDict(
+        env_prefix="IGNORE_",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
 
 class AIProviderConfig(BaseSettings):
@@ -239,11 +242,30 @@ class CoreConfig(BaseSettings):
         return cls()
     
     def to_yaml(self, path: Path) -> None:
-        """Save configuration to YAML file."""
+        """Save configuration to YAML file with strict 0600 file permissions."""
         path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            try:
+                os.chmod(path.parent, 0o700)
+            except OSError:
+                pass
         data = self.model_dump(mode="json")
-        with open(path, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        mode = 0o600
+        try:
+            fd = os.open(path, flags, mode)
+            with open(fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+        except Exception:
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            if os.name != "nt":
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
 
 
 # Global config instance

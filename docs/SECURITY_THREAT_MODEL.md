@@ -284,3 +284,24 @@ All security events are appended to `system_actions_log` in SQLite:
 - `error_message` (Detailed forensic string)
 
 **Fail-Secure Invariant:** The database transaction for `system_actions_log` is committed *before* or *atomically with* the operational result. If the audit table cannot be written, the action is aborted immediately.
+
+---
+
+## 6. Stage 1 Hardening & Vulnerability Remediation Matrix
+
+All 12 critical security vulnerabilities discovered during the initial architecture audit have been remediated, verified, and locked under dedicated adversarial tests during Stage 1 implementation.
+
+| ID | Vulnerability | Threat Category | Remediation Status | Enforcing Components & Test Evidence |
+| :--- | :--- | :--- | :---: | :--- |
+| **V1** | Hardcoded installer credentials (`serein:serein`) | Credential Theft | **FIXED AND TESTED** | Account locked with `passwd -l serein` in `build_iso.sh`; `installer_engine.py` rejects default/trivial passwords ($\ge 8$ chars required); tested in `test_m4_empirical_adversarial_recheck.py`. |
+| **V2** | Passwordless sudo (`NOPASSWD:ALL`) | Privilege Escalation | **FIXED AND TESTED** | `build_iso.sh` enforces standard `%sudo ALL=(ALL:ALL) ALL` requiring password authentication; tested in `test_m4_empirical_adversarial_recheck.py`. |
+| **V3** | Unprompted auto-grant of permissions | Unauthorized Access | **FIXED AND TESTED** | `safety_layer.py:request_permission()` returns `False` without UI approval; tested in `test_stage1_security_adversarial.py`. |
+| **V4** | Stateless / unbound confirmation tokens | Request Replay / Substitution | **FIXED AND TESTED** | `command_bus.py` implements server-tracked challenges with 300s TTL, canonical SHA-256 parameter hashing, and atomic consumption; tested in `test_stage1_security_adversarial.py`. |
+| **V5** | SafetyLayer bypassed by Command Bus | Policy Bypass | **FIXED AND TESTED** | `command_bus.py` checks `safety_layer.validate_action()`; `safety_layer.py` uses canonical `Path.resolve()` containment; tested in `test_command_bus_enforces_safety_layer`. |
+| **V6** | Browser media stream consent bypass | Privacy Breach / Sensor Hijack | **FIXED AND TESTED** | Removed `--use-fake-ui-for-media-stream` and insecure origin bypass flags from `install_artifacts_container.sh`; tested in `test_m4_empirical_adversarial_recheck.py`. |
+| **V7** | Unrestricted file delete & path traversal | Data Destruction / Sandbox Escape | **FIXED AND TESTED** | `validate_safe_path()` resolves canonical paths, rejects `../` and prohibited roots; deletions in user workspaces redirect to Freedesktop Trash; tested in `test_stage1_security_adversarial.py`. |
+| **V8** | Server-Side Request Forgery (SSRF) | Internal Network Pivoting | **FIXED AND TESTED** | DNS pre-flight checks reject loopback, link-local, private RFC1918 CIDRs, and reserved ranges; tested in `test_stage1_security_adversarial.py`. |
+| **V9** | Arbitrary app launch & shell injection | Host Compromise / RCE | **FIXED AND TESTED** | Strict `APPROVED_APPLICATIONS` whitelist enforced; shell metacharacters rejected; arbitrary binaries blocked; tested in `test_stage1_security_adversarial.py`. |
+| **V10** | Unrestricted self-evolution host overwrite | Code Injection / Persistence | **FIXED AND TESTED** | `self_evolution.py` enforces canonical `is_relative_to(repo_root)` validation and bans absolute paths; `agent_sandbox.py` strictly raises `PermissionError` without Docker/Podman; tested in `test_stage1_security_adversarial.py`. |
+| **V11** | Plaintext config secrets & PRAGMA SQLi | Credential Exposure / SQLi | **FIXED AND TESTED** | `config.py` enforces `0600` permissions on secret files, `0700` on directories; `database.py` validates and escapes encryption key; tested in `test_stage1_security_adversarial.py`. |
+| **V12** | Silent audit log suppression | Forensic Evasion | **FIXED AND TESTED** | `command_bus._log_audit()` fails closed for sensitive/destructive operations if logging fails (`Security audit failure: action aborted`); denied actions logged; tested in `test_destructive_action_fails_closed_when_audit_fails`. |
