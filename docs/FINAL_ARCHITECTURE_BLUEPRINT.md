@@ -57,38 +57,40 @@ graph TD
 
 ## 2. Process Architecture & Supervision Tree
 
-To ensure stability, memory safety, and fault isolation, SereinOS splits its runtime across four dedicated, supervised systemd user processes. A crash in the visual avatar shell will not interrupt scheduled reminders or background audio capture.
+To ensure stability, memory safety, and fault isolation, SereinOS establishes an authoritative 3-tier process model supervised exclusively via **`systemd --user` units** under `serein.target`. User-level supervision guarantees direct access to the user seat graphics pipeline (`/dev/dri/renderD128`), input devices via `libinput`, and the active PipeWire audio session without requiring root privileges.
 
 ```mermaid
 graph TD
-    subgraph SYSTEMD_SUPERVISION["systemd --user Supervision Tree"]
+    subgraph SYSTEMD_USER_SUPERVISION["systemd --user Supervision Tree (serein.target)"]
         direction TB
         Target["serein.target"]
         
-        S1["serein-core.service<br/><b>Core AI Daemon</b><br/>(FastAPI / WebSockets / SQLite / Brain)"]
-        S2["serein-compositor.service<br/><b>Wayland Compositor</b><br/>(wlroots / labwc / DRM / KMS)"]
-        S3["serein-voice.service<br/><b>Audio Pipeline</b><br/>(PipeWire / VAD / Piper / Whisper)"]
-        S4["serein-shell.service<br/><b>Companion Shell UI</b><br/>(Wayland Kiosk / Avatar / Visemes)"]
+        S1["serein-compositor.service<br/><b>Wayland Compositor (labwc)</b><br/>(wlroots / layer-shell / seat input / DRM KMS)"]
+        S2["serein-core.service<br/><b>Core AI Daemon</b><br/>(FastAPI / SQLite WAL / Brain / In-Process Voice Worker)"]
+        S3["serein-shell.service<br/><b>Companion Shell UI</b><br/>(Chromium Kiosk / Avatar WebGL / Dialogue / Modals)"]
     end
 
-    Target --> S2
-    S2 --> S1
-    S1 --> S3
-    S1 --> S4
+    Target --> S1
+    S1 --> S2
+    S2 --> S3
 
-    S1 <-- "UNIX Domain Socket (/run/user/UID/serein/core.sock)" --> S4
-    S1 <-- "Internal Async Event Bus / IPC" --> S3
-    S2 <-- "Wayland Protocol / Layer-Shell" --> S4
+    S2 <-- "UNIX Domain Socket (/run/user/UID/serein/core.sock, mode 0600)" --> S3
+    S1 <-- "Wayland Protocol / wlr-layer-shell" --> S3
+    S2 -. "In-Process Audio Loop (Zero-Copy PCM / 60fps Visemes)" .-> S2
 ```
 
-### Process Responsibilities
+### Authoritative Process Roles & Supervision
 
-| Process Name | Service Unit | Binary / Entry Point | Responsibility & Fault Domain |
-| :--- | :--- | :--- | :--- |
-| **Core AI Daemon** | `serein-core.service` | `python -m serein_core` | Orchestrates intent classification, decision routing, SQLite persistence, local brain reasoning, command bus execution, and scheduling. Survives UI restarts. |
-| **Wayland Compositor** | `serein-compositor.service` | `serein-compositor` (or `labwc`) | Manages graphics output (DRM/KMS), seat input devices (libinput), Wayland surface stacking, and layer-shell overlays. |
-| **Voice Daemon** | `serein-voice.service` | `python -m serein_voice` (or internal thread) | Continuous low-power audio capture via PipeWire, Voice Activity Detection (WebRTC VAD), wake-word detection, STT transcription, and TTS streaming. |
-| **Companion Shell** | `serein-shell.service` | `serein-shell` | Fullscreen Wayland kiosk application rendering Serein's visual avatar, conversational messages, settings, and interactive permission confirmation modals. |
+| Process Name | Service Unit | Binary / Command | Execution Context | Responsibility & Fault Domain |
+| :--- | :--- | :--- | :--- | :--- |
+| **Wayland Compositor** | `serein-compositor.service` | `/usr/bin/labwc` | `systemd --user` | Manages graphics output (DRM/KMS), seat input devices (libinput), Wayland surface stacking, and `wlr-layer-shell-unstable-v1` overlays. Supervised with `Restart=always`. |
+| **Core AI Daemon** | `serein-core.service` | `python -m serein_core` | `systemd --user` | Primary OS intelligence. Orchestrates intent classification, decision routing, SQLite persistence, local brain reasoning, command bus execution, and scheduling. Hosts the **in-process `VoiceEngine` worker thread** for zero-copy PCM audio passing. Supervised with `Restart=on-failure`. |
+| **Companion Shell** | `serein-shell.service` | `/usr/bin/chromium --kiosk --ozone-platform=wayland` | `systemd --user` | Fullscreen Wayland kiosk application rendering Serein's visual avatar, conversational messages, settings, and interactive permission confirmation modals. Connects to `serein-core` via UNIX domain socket. Supervised with `Restart=always`. |
+
+### IPC Boundary & Inter-Process Authentication
+1. **UNIX Domain Socket:** All IPC between the Shell UI and Core Daemon takes place over a dedicated UNIX domain socket located at `/run/user/<UID>/serein/core.sock` with strict filesystem permissions (`0600`, owner-only).
+2. **Session Authentication:** Upon connection, the Shell client exchanges a randomly generated session token created by `serein-core` at boot time (`/run/user/<UID>/serein/session.token`), preventing unauthorized local processes under the same UID from dispatching commands without authorization.
+3. **Voice Engine Integration:** To prevent audio latency, buffer underruns, and IPC serialization overhead on low-spec hardware (AMD E-450), the `VoiceEngine` runs as a high-performance internal background thread within `serein-core`, communicating with the main loop via memory-shared zero-copy asyncio queues.
 
 ---
 
@@ -170,19 +172,22 @@ sequenceDiagram
     Core->>DecisionEng: decide(intent, context)
     DecisionEng-->>Core: Decision(route=COMMAND_BUS, action="delete_file", tier=DESTRUCTIVE)
     
-    Core->>SafetyGate: validate_action("delete_file", params)
-    SafetyGate-->>Core: SafetyResult(allowed=False, requires_confirmation=True, token="hmac_token_xyz")
+    Core->>SafetyGate: validate_action("delete_file", params, session_id)
+    SafetyGate->>SafetyGate: Generate Server-Tracked Challenge (challenge_id, param_hash, expires_at)
+    SafetyGate-->>Core: SafetyResult(allowed=False, requires_confirmation=True, challenge_id="ch_123abc")
     
-    Core->>UI: Emit CoreEvents.CONFIRMATION_REQUESTED (Prompt & Token)
-    UI->>User: Displays interactive confirmation modal
+    Core->>UI: Emit CoreEvents.CONFIRMATION_REQUESTED (Prompt, Challenge ID)
+    UI->>User: Displays interactive confirmation modal with exact action & path
     User->>UI: Clicks "Approve Deletion"
-    UI->>Core: Submit confirmation(token="hmac_token_xyz", command="delete_file", params)
+    UI->>Core: Submit confirmation(challenge_id="ch_123abc", command="delete_file", params)
     
-    Core->>CmdBus: execute("delete_file", params, token)
-    CmdBus->>CmdBus: Verify HMAC token matches (command, params, ttl <= 300s)
-    CmdBus->>CmdBus: Validate path sandbox (must be within safe allowed roots)
-    CmdBus->>CmdBus: Perform deletion & write fail-secure audit log to SQLite
-    CmdBus-->>Core: CommandResult(success=True, deleted="~/Downloads/tmp")
+    Core->>CmdBus: execute("delete_file", params, challenge_id)
+    CmdBus->>SafetyGate: consume_challenge(challenge_id, session_id, "delete_file", params)
+    SafetyGate->>SafetyGate: Atomic SQLite UPDATE: check param_hash, TTL <= 300s, status='pending' -> 'consumed'
+    CmdBus->>CmdBus: Validate path sandbox (user workspace allowed; system roots rejected)
+    CmdBus->>CmdBus: Redirect user workspace deletion to Freedesktop Trash (~/.local/share/Trash)
+    CmdBus->>CmdBus: Write fail-secure audit log to SQLite (system_actions_log)
+    CmdBus-->>Core: CommandResult(success=True, trashed="~/Downloads/tmp")
     
     Core->>MemDB: Store action turn in dialogue & update working memory
     Core->>Core: Evaluate emotion change (Care +5, Concern -2)
@@ -242,24 +247,28 @@ Security in SereinOS is strictly non-negotiable. Operating system tasks are exec
 ```mermaid
 flowchart TD
     subgraph COMMAND_SECURITY["Secure Command Bus Architecture"]
-        Req["Command Request (command, params)"] --> TierCheck{"Permission Tier?"}
+        Req["Command Request (command, params, session_id)"] --> TierCheck{"Permission Tier?"}
         
         TierCheck -- "READ_ONLY" --> Sandbox["Validate Path Sandbox"]
-        TierCheck -- "REVERSIBLE" --> CheckApp{"Is App in Whitelist?"}
-        TierCheck -- "DESTRUCTIVE / SENSITIVE" --> TokenCheck{"Valid HMAC Token?"}
-        
-        TokenCheck -- No Token --> GenToken["Generate HMAC Token<br/>(Secret + Command + SHA256(Params) + Expire)"]
-        GenToken --> EmitModal["Emit Confirmation Modal to User UI"]
-        
-        TokenCheck -- Token Provided --> VerifyToken{"Token Matches Current<br/>Command & Params & Valid TTL?"}
-        VerifyToken -- No / Tampered --> RejectTamper["REJECT (403 Forbidden) & Audit Log"]
-        VerifyToken -- Verified --> Sandbox
-        
-        CheckApp -- Whitelisted --> Sandbox
-        CheckApp -- Not Whitelisted --> RejectApp["REJECT: Binary Not in Whitelist"]
+        TierCheck -- "REVERSIBLE" --> CheckApp{"Is Action App Launch?"}
+        CheckApp -- Yes --> AppWhitelist{"Is App in Whitelist?"}
+        CheckApp -- No --> Sandbox
+        AppWhitelist -- Whitelisted --> ExecAction["Execute Action in Host Process"]
+        AppWhitelist -- Not Whitelisted --> RejectApp["REJECT: Binary Not in Whitelist"]
 
-        Sandbox -- Outside Safe Root --> RejectPath["REJECT: Path Traversal / Protected Path"]
-        Sandbox -- Safe Path --> ExecAction["Execute Action in Host Process"]
+        TierCheck -- "DESTRUCTIVE / SENSITIVE" --> ChallengeCheck{"Valid Challenge ID Provided?"}
+        
+        ChallengeCheck -- No Challenge --> CreateChal["Create Server-Tracked Challenge<br/>(SQLite pending_challenges, TTL=300s)"]
+        CreateChal --> EmitModal["Emit Confirmation Modal to Shell UI"]
+        
+        ChallengeCheck -- Challenge ID Provided --> AtomicConsume{"Atomic SQLite UPDATE:<br/>status='pending' -> 'consumed'<br/>AND param_hash == SHA256(params)<br/>AND expires_at > now?"}
+        AtomicConsume -- Failed / Replay / Tampered --> RejectTamper["REJECT (403 Forbidden) & Write Audit"]
+        AtomicConsume -- Success --> Sandbox
+
+        Sandbox -- Prohibited System Root --> RejectPath["REJECT: Prohibited System Path"]
+        Sandbox -- User Workspace Path (Delete) --> TrashRedirect["Redirect to Freedesktop Trash<br/>(~/.local/share/Trash)"]
+        Sandbox -- Safe Path (Non-Delete / Scratch) --> ExecAction
+        TrashRedirect --> ExecAction
         
         ExecAction --> WriteAudit["Fail-Secure Audit Log to SQLite"]
         WriteAudit --> RetResult["Return CommandResult"]
@@ -268,29 +277,49 @@ flowchart TD
 
 ### Security Boundary Specifications
 
-1. **Cryptographically Bound Confirmation Tokens:**
-   - A confirmation token is generated using:
-     $$\text{Token} = \text{HMAC-SHA256}\Big(\text{secret\_key}, \text{command} \,\|\, \text{SHA256}(\text{canonical\_json}(\text{params})) \,\|\, \text{timestamp}\Big)$$
-   - The token expires strictly after **300 seconds (5 minutes)**.
-   - When the user confirms the action in the UI, `execute()` re-computes the HMAC against the *currently supplied* command and params. If an attacker modifies the parameters (e.g. changes `/tmp/cache` to `/etc/passwd`), the HMAC verification immediately fails.
-2. **Canonical Path Sandboxing:**
-   - All file operations (`read_file`, `move_file`, `delete_file`) resolve paths using `.resolve()`.
-   - Operations are strictly restricted to:
-     - `~/Documents/Serein/`
-     - `~/.local/share/serein/`
-     - `/tmp/serein/`
-   - Explicitly prohibited roots (instant rejection): `/`, `/bin`, `/sbin`, `/usr`, `/etc`, `/boot`, `/sys`, `/proc`, `/dev`, `/root`, `~/.ssh`, `~/.gnupg`, `~/.config`.
+1. **Server-Tracked Single-Use Confirmation Challenges:**
+   - Stateless tokens (HMAC-only) are explicitly rejected because they do not protect against replay or concurrent execution races.
+   - All destructive or sensitive actions generate a server-tracked challenge stored in SQLite:
+     ```sql
+     INSERT INTO pending_challenges (challenge_id, session_id, command, param_hash, expires_at, status)
+     VALUES (?, ?, ?, ?, ?, 'pending');
+     ```
+   - **Parameter Immutability:** `param_hash` is computed as $\text{SHA-256}(\text{canonical\_json}(\text{params}))$. If parameters change between issuance and confirmation, verification fails.
+   - **Atomic Single-Use Consumption:**
+     ```sql
+     UPDATE pending_challenges 
+     SET status = 'consumed', consumed_at = ? 
+     WHERE challenge_id = ? AND session_id = ? AND command = ? AND param_hash = ? 
+       AND status = 'pending' AND expires_at > ?;
+     ```
+   - **Strict TTL:** Challenges expire in exactly **300 seconds (5 minutes)**. Replay attempts are instantly rejected because `status` is no longer `'pending'`.
+   - **Session Concurrency Gate:** Only one pending challenge is allowed per session at any time; creating a new challenge marks existing pending challenges as `'cancelled'`.
+
+2. **Canonical Path Sandboxing & Freedesktop Trash Redirection:**
+   - All file operations (`read_file`, `move_file`, `delete_file`) resolve paths to absolute canonical form using `Path.resolve()`.
+   - **Allowed Workspaces:**
+     - User workspace: `~/Documents`, `~/Downloads`, `~/Desktop`, `~/.local/share/serein/`
+     - Transient scratch: `/tmp/serein/`
+   - **Freedesktop Trash Redirection:** Irreversible hard deletion (`shutil.rmtree`, `os.unlink`) is strictly prohibited in user workspaces. File deletion requests in user directories are redirected to the Freedesktop Trash specification (`~/.local/share/Trash`) via `gio trash` or `send2trash`, guaranteeing 100% user recoverability. Hard unlinking is only permitted in `/tmp/serein/`.
+   - **Prohibited System Roots:** Operations targeting `/`, `/bin`, `/sbin`, `/usr`, `/etc`, `/boot`, `/sys`, `/proc`, `/dev`, `/root`, `~/.ssh`, `~/.gnupg`, `~/.config` are rejected immediately.
+
 3. **Application Whitelisting:**
-   - `launch_app` forbids arbitrary executable paths and command string interpolation.
-   - Permissible launch applications are mapped to verified desktop definitions:
+   - `launch_app` accepts only whitelisted canonical application identifiers mapped to verified `.desktop` files or system binaries:
      `{"terminal": "/usr/bin/foot", "browser": "/usr/bin/chromium", "files": "/usr/bin/thunar", "calc": "/usr/bin/gnome-calculator"}`.
-4. **Server-Side Request Forgery (SSRF) Guard:**
-   - `network_request` resolves hostnames before socket connection.
-   - Outbound requests to IPv4/IPv6 loopback (`127.0.0.0/8`, `::1`), private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), or broadcast addresses are strictly rejected.
-   - External requests require destination domains to match an approved allowlist.
+   - Shell string interpolation, raw binary paths, and custom shell pipelines (`sh -c`) are prohibited.
+
+4. **SSRF Guard with Socket-Level IP Pinning:**
+   - Pre-flight DNS resolution validates IP addresses before creating any network connection.
+   - **Blocked Ranges:** Requests targeting IPv4/IPv6 loopback (`127.0.0.0/8`, `::1`), private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), or multicast addresses are rejected.
+   - **DNS Rebinding Prevention:** The HTTP client connects directly to the pre-validated IP address at the socket level while injecting the original domain into the HTTP `Host` header, preventing DNS rebinding between check time and connect time.
+
 5. **Fail-Secure Security Audit Trail:**
-   - Every system command invocation, permission denial, invalid confirmation token attempt, and execution result is written to the `system_actions_log` SQLite table.
-   - If database logging encounters a failure (e.g. disk full), destructive commands abort immediately.
+   - Every system command invocation, permission check, challenge consumption, authorization failure, and execution result is written to `system_actions_log`.
+   - **Fail-Secure Guarantee:** Destructive commands must write the pending audit record before execution. If the audit database is read-only or unreachable, the action aborts immediately.
+
+6. **Least Privilege & Zero Root Sudo:**
+   - SereinOS desktop services run under `systemd --user` with standard user privileges.
+   - Passwordless root sudo (`NOPASSWD:ALL`) is permanently removed from the OS configuration. Privileged operations (reboot, poweroff, network configuration) use Polkit policies. Autonomous agents are prohibited from executing directly on the host OS without containerization.
 
 ---
 
@@ -466,12 +495,27 @@ erDiagram
         string updated_at
     }
 
+    PENDING_CHALLENGES {
+        string challenge_id PK
+        string session_id
+        string command
+        string param_hash
+        string expires_at
+        string status
+        string created_at
+        string consumed_at
+    }
+
     SCHEMA_VERSION {
         int version PK
         string applied_at
         string description
     }
 ```
+
+### Authoritative Database Ownership & Legacy Schema Deprecation
+- **Sole Source of Truth:** [`serein_core.database`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/database.py) is the sole authoritative owner of all database tables, connection pooling, migrations, and PRAGMA settings.
+- **Legacy Deprecation:** All legacy schemas in `src/database/` and redundant documentation files (`docs/DB_FINAL_SCHEMA.md`) are explicitly deprecated and scheduled for removal during codebase consolidation. No external script or engine may create or alter tables outside `serein_core.database`.
 
 ### Database Performance & Durability PRAGMAs
 ```sql
