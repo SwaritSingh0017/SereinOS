@@ -15,12 +15,17 @@ import ipaddress
 import hashlib
 import time
 import tempfile
+import inspect
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable, Set
 from uuid import uuid4
+
+import aiohttp
+import aiohttp.abc
 
 from dbus_next import BusType, MessageType
 from dbus_next.aio import MessageBus
@@ -104,6 +109,83 @@ def _compute_param_hash(params: Dict[str, Any]) -> str:
     clean_params = {k: v for k, v in params.items() if not k.startswith("_")}
     canonical = _canonical_json(clean_params)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# IP CIDRs explicitly blocked to prevent SSRF and internal network scanning
+BLOCKED_CIDRS = [
+    ipaddress.ip_network("0.0.0.0/8"),          # Current network
+    ipaddress.ip_network("10.0.0.0/8"),         # RFC1918 Private
+    ipaddress.ip_network("100.64.0.0/10"),      # Shared Address Space (Carrier-Grade NAT)
+    ipaddress.ip_network("127.0.0.0/8"),        # Loopback
+    ipaddress.ip_network("169.254.0.0/16"),     # Link-Local / Cloud Metadata
+    ipaddress.ip_network("172.16.0.0/12"),      # RFC1918 Private
+    ipaddress.ip_network("192.0.0.0/24"),       # IETF Protocol Assignments
+    ipaddress.ip_network("192.0.2.0/24"),       # Documentation (TEST-NET-1)
+    ipaddress.ip_network("192.168.0.0/16"),     # RFC1918 Private
+    ipaddress.ip_network("198.18.0.0/15"),      # Benchmarking
+    ipaddress.ip_network("198.51.100.0/24"),    # Documentation (TEST-NET-2)
+    ipaddress.ip_network("203.0.113.0/24"),     # Documentation (TEST-NET-3)
+    ipaddress.ip_network("224.0.0.0/4"),        # Multicast
+    ipaddress.ip_network("240.0.0.0/4"),        # Reserved for Future Use
+    ipaddress.ip_network("255.255.255.255/32"), # Broadcast
+    ipaddress.ip_network("::/128"),             # Unspecified IPv6
+    ipaddress.ip_network("::1/128"),            # Loopback IPv6
+    ipaddress.ip_network("::ffff:0:0/96"),      # IPv4-mapped IPv6
+    ipaddress.ip_network("100::/64"),           # Discard-only prefix
+    ipaddress.ip_network("2001:db8::/32"),      # Documentation IPv6
+    ipaddress.ip_network("fc00::/7"),           # Unique Local IPv6 (ULA)
+    ipaddress.ip_network("fe80::/10"),          # Link-Local IPv6
+    ipaddress.ip_network("ff00::/8"),           # Multicast IPv6
+]
+
+
+def is_ip_blocked(ip_obj: Any) -> bool:
+    """Check if an IP address belongs to any blocked, private, local, or reserved range."""
+    # Handle IPv4-mapped IPv6 address
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+        ip_obj = ip_obj.ipv4_mapped
+
+    if (
+        ip_obj.is_loopback
+        or ip_obj.is_private
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    ):
+        return True
+
+    for net in BLOCKED_CIDRS:
+        if ip_obj in net:
+            return True
+
+    return False
+
+
+class PinnedIPResolver(aiohttp.abc.AbstractResolver):
+    """
+    Custom aiohttp DNS resolver that forces socket connections to connect
+    ONLY to pre-validated IP address(es), eliminating DNS rebinding (TOCTOU) attacks.
+    Preserves TLS SNI and certificate validation against the original hostname.
+    """
+    def __init__(self, hostname: str, pinned_ip: str, port: int, family: int):
+        self.hostname = hostname
+        self.pinned_ip = pinned_ip
+        self.port = port
+        self.family = family
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[dict]:
+        return [{
+            "hostname": self.hostname,
+            "host": self.pinned_ip,
+            "port": self.port if self.port else port,
+            "family": self.family,
+            "proto": socket.IPPROTO_TCP,
+            "flags": 0,
+        }]
+
+    async def close(self) -> None:
+        pass
 
 
 def validate_safe_path(target_path: str, operation: str = "read") -> Path:
@@ -459,31 +541,35 @@ class DestructiveHandlers:
     
     @staticmethod
     async def install_package(params: Dict) -> CommandResult:
-        """Install a package with strict input sanitization."""
+        """Install a package with strict input sanitization and flag injection prevention."""
         package = params.get("package")
         manager = params.get("manager", "apt")
         if not package:
             return CommandResult(success=False, error="package required")
             
-        # Prevent shell injection in package names
-        if not re.match(r"^[a-zA-Z0-9_\-\.]+$", package):
+        # Prevent shell injection, flag injection, and path traversal in package names
+        # Must start with alphanumeric and contain only safe package name characters
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.\+]{0,63}$", package):
             return CommandResult(
                 success=False,
-                error=f"Invalid package name '{package}': only alphanumeric characters, dashes, and dots allowed",
+                error=f"Invalid package name '{package}': must start with alphanumeric and contain only safe package chars",
                 status=CommandStatus.DENIED
             )
 
+        valid_managers = {"apt", "pacman", "flatpak", "snap"}
+        if manager not in valid_managers:
+            return CommandResult(success=False, error=f"Unknown or unauthorized package manager: {manager}", status=CommandStatus.DENIED)
+
         try:
+            # Enforce '--' delimiter before package name to prevent flag injection
             cmds = {
-                "apt": ["apt", "install", "-y", package],
-                "pacman": ["pacman", "-S", "--noconfirm", package],
-                "flatpak": ["flatpak", "install", "-y", package],
-                "snap": ["snap", "install", package],
+                "apt": ["apt", "install", "-y", "--", package],
+                "pacman": ["pacman", "-S", "--noconfirm", "--", package],
+                "flatpak": ["flatpak", "install", "-y", "--", package],
+                "snap": ["snap", "install", "--", package],
             }
-            if manager not in cmds:
-                return CommandResult(success=False, error=f"Unknown manager: {manager}")
             
-            if not shutil.which(cmds[manager][0]):
+            if os.environ.get("SEREIN_MOCK_SUBPROCESS", "0") == "1" or not shutil.which(cmds[manager][0]):
                 return CommandResult(
                     success=True,
                     result={"stdout": "simulated package install", "stderr": "", "package": package},
@@ -510,61 +596,111 @@ class SensitiveHandlers:
     
     @staticmethod
     async def network_request(params: Dict) -> CommandResult:
-        """Make network request with strict SSRF & DNS rebinding protection (ADR-008)."""
+        """
+        Make network request with strict SSRF & DNS rebinding protection (ADR-008).
+        Pins TCP socket connection to pre-validated IP address, rejecting DNS rebinding attacks.
+        Follows redirects manually up to 5 steps, re-validating every redirect target IP before connecting.
+        """
         url = params.get("url")
-        method = params.get("method", "GET")
+        method = params.get("method", "GET").upper()
         headers = params.get("headers", {})
         data = params.get("data")
         if not url:
             return CommandResult(success=False, error="url required")
-            
+
+        MAX_REDIRECTS = 5
+        current_url = url
+
         try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                return CommandResult(
-                    success=False,
-                    error=f"Unsupported scheme '{parsed.scheme}': only http and https allowed",
-                    status=CommandStatus.DENIED
-                )
-            
-            hostname = parsed.hostname
-            if not hostname:
-                return CommandResult(success=False, error="Invalid URL: missing hostname", status=CommandStatus.DENIED)
-                
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            
-            # DNS resolution pre-flight check
-            addr_info = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
-            if not addr_info:
-                return CommandResult(success=False, error=f"Could not resolve hostname '{hostname}'", status=CommandStatus.FAILED)
-                
-            for ai in addr_info:
-                ip_str = ai[4][0]
-                ip_obj = ipaddress.ip_address(ip_str)
-                if (
-                    ip_obj.is_loopback
-                    or ip_obj.is_private
-                    or ip_obj.is_link_local
-                    or ip_obj.is_multicast
-                    or ip_obj.is_reserved
-                    or ip_obj.is_unspecified
-                ):
+            for redirect_step in range(MAX_REDIRECTS + 1):
+                parsed = urllib.parse.urlparse(current_url)
+                if parsed.scheme not in ("http", "https"):
                     return CommandResult(
                         success=False,
-                        error=f"SSRF blocked: Host '{hostname}' resolves to forbidden private or local IP {ip_str}",
+                        error=f"Unsupported scheme '{parsed.scheme}': only http and https allowed",
                         status=CommandStatus.DENIED
                     )
 
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.request(method, url, headers=headers, json=data) as resp:
-                    text = await resp.text()
-                    return CommandResult(success=True, result={
-                        "status": resp.status,
-                        "headers": dict(resp.headers),
-                        "body": text[:10000],
-                    }, permission_tier=PermissionTier.SENSITIVE)
+                hostname = parsed.hostname
+                if not hostname:
+                    return CommandResult(success=False, error="Invalid URL: missing hostname", status=CommandStatus.DENIED)
+
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+                # DNS resolution pre-flight check
+                loop = asyncio.get_event_loop()
+                try:
+                    addr_info = await loop.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+                except socket.gaierror as e:
+                    return CommandResult(success=False, error=f"DNS resolution failed for '{hostname}': {e}", status=CommandStatus.FAILED)
+
+                if not addr_info:
+                    return CommandResult(success=False, error=f"Could not resolve hostname '{hostname}'", status=CommandStatus.FAILED)
+
+                validated_records = []
+                for ai in addr_info:
+                    family, socktype, proto, canonname, sockaddr = ai
+                    ip_str = sockaddr[0]
+                    try:
+                        ip_obj = ipaddress.ip_address(ip_str)
+                    except ValueError:
+                        return CommandResult(
+                            success=False,
+                            error=f"SSRF blocked: Invalid IP address returned for host '{hostname}': {ip_str}",
+                            status=CommandStatus.DENIED
+                        )
+
+                    if is_ip_blocked(ip_obj):
+                        return CommandResult(
+                            success=False,
+                            error=f"SSRF blocked: Host '{hostname}' resolves to forbidden private or local IP {ip_str}",
+                            status=CommandStatus.DENIED
+                        )
+                    validated_records.append((ip_str, family, sockaddr[1]))
+
+                # Pin socket connection to the first validated IP address to prevent DNS rebinding
+                pinned_ip, pinned_family, pinned_port = validated_records[0]
+                resolver = PinnedIPResolver(hostname, pinned_ip, pinned_port, pinned_family)
+                connector = aiohttp.TCPConnector(resolver=resolver)
+
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.request(
+                        method,
+                        current_url,
+                        headers=headers,
+                        json=data,
+                        allow_redirects=False
+                    ) as resp:
+                        # Handle redirects explicitly with full destination IP revalidation
+                        if resp.status in (301, 302, 303, 307, 308):
+                            if redirect_step >= MAX_REDIRECTS:
+                                return CommandResult(
+                                    success=False,
+                                    error="Too many redirects (exceeded limit of 5)",
+                                    status=CommandStatus.FAILED
+                                )
+                            loc = resp.headers.get("Location")
+                            if not loc:
+                                body = await resp.text()
+                                return CommandResult(
+                                    success=True,
+                                    result={"status": resp.status, "headers": dict(resp.headers), "body": body[:10000]},
+                                    permission_tier=PermissionTier.SENSITIVE
+                                )
+                            next_url = urllib.parse.urljoin(current_url, loc)
+                            current_url = next_url
+                            continue
+
+                        body = await resp.text()
+                        return CommandResult(
+                            success=True,
+                            result={
+                                "status": resp.status,
+                                "headers": dict(resp.headers),
+                                "body": body[:10000],
+                            },
+                            permission_tier=PermissionTier.SENSITIVE
+                        )
         except PermissionError as e:
             return CommandResult(success=False, error=str(e), status=CommandStatus.DENIED)
         except Exception as e:
@@ -580,7 +716,8 @@ class CommandBus:
     """Main Command Bus - D-Bus service for system control."""
     
     def __init__(self, allowed_tiers: Optional[Set[PermissionTier]] = None, dry_run: bool = False,
-                 safety_layer: Optional[SafetyLayer] = None):
+                 safety_layer: Optional[SafetyLayer] = None, database: Optional[Any] = None,
+                 require_session: bool = False):
         self.bus: Optional[MessageBus] = None
         bus_cfg = getattr(config, "command_bus", None)
         self.service_name = getattr(bus_cfg, "dbus_service_name", "os.serein.CommandBus") if bus_cfg else "os.serein.CommandBus"
@@ -588,11 +725,57 @@ class CommandBus:
         self.allowed_tiers = set(allowed_tiers) if allowed_tiers is not None else {PermissionTier.READ_ONLY}
         self.dry_run = dry_run
         self.safety_layer = safety_layer or SafetyLayer()
+        self.db = database
+        self.require_session = require_session
         self._handlers: Dict[str, CommandHandler] = {}
-        # Server-tracked confirmation challenges (ADR-004)
-        self._pending_challenges: Dict[str, Dict[str, Any]] = {}
-        self._pending_confirmations = self._pending_challenges  # Backward compatibility alias
         self._register_handlers()
+
+    async def _get_db(self):
+        """Get database instance for persistent challenge tracking and forensic audit."""
+        if self.db is not None:
+            return self.db
+        try:
+            return await get_database()
+        except Exception as e:
+            logger.error(f"Failed to obtain database instance: {e}")
+            return None
+
+    async def _safe_await(self, obj: Any) -> Any:
+        """Safely await an object if it is awaitable, or return it directly."""
+        if inspect.isawaitable(obj):
+            return await obj
+        return obj
+
+    async def _is_valid_session(self, session_id: Optional[str]) -> bool:
+        """Validate if session_id corresponds to an active, authenticated UI/daemon session."""
+        if not session_id or not str(session_id).strip():
+            return False
+
+        # In non-strict mode (testing or local terminal execution), default sessions are valid
+        if not self.require_session and session_id in ("default_session", "system_local", "local_console"):
+            return True
+
+        # 1. In-memory SecurityManager active sessions
+        try:
+            from serein_core.auth import security_manager
+            sess = security_manager.validate_session(session_id)
+            if sess:
+                return True
+        except Exception:
+            pass
+
+        # 2. SQLite conversation_sessions
+        try:
+            db = await self._get_db()
+            if db and hasattr(db, "fetch_one"):
+                res = db.fetch_one("SELECT id FROM conversation_sessions WHERE id = ?", (session_id,))
+                row = await self._safe_await(res)
+                if row:
+                    return True
+        except Exception:
+            pass
+
+        return False
     
     def _register_handlers(self) -> None:
         """Register all default command handlers."""
@@ -700,14 +883,15 @@ class CommandBus:
         interface.add_method(ListCommands)
         return interface
 
-    async def _log_audit(self, command: str, params: Dict, tier: PermissionTier, result_str: str, error_msg: Optional[str] = None) -> bool:
+    async def _log_audit(self, command: str, params: Dict, tier: PermissionTier, result_str: str, 
+                         error_msg: Optional[str] = None, session_id: Optional[str] = None) -> bool:
         """
         Write security audit log entry.
         Returns True on success, False if logging failed.
         """
         try:
-            db = await get_database()
-            if hasattr(db, "log_action"):
+            db = await self._get_db()
+            if db and hasattr(db, "log_action"):
                 await db.log_action({
                     "action_type": command,
                     "target": str(params.get("path") or params.get("app") or params.get("url") or params.get("target") or ""),
@@ -717,14 +901,18 @@ class CommandBus:
                     "result": result_str,
                     "error_message": error_msg,
                 })
-            return True
+                return True
+            return False
         except Exception as e:
             logger.error(f"Audit log write failed: {e}")
             return False
 
     async def execute(self, command: str, params: Optional[Dict[str, Any]] = None, 
-                      confirmation_token: str = "") -> CommandResult:
-        """Execute a command with strict permission, safety, and single-use challenge verification."""
+                      confirmation_token: str = "", session_id: Optional[str] = None) -> CommandResult:
+        """
+        Execute a command with strict permission, safety, session authentication,
+        and durable SQLite-backed single-use challenge verification.
+        """
         params = params or {}
         
         if command not in self._handlers:
@@ -735,10 +923,33 @@ class CommandBus:
             )
         
         handler = self._handlers[command]
-        
-        # 1. Permission Tier Enforcement
+        resolved_session = session_id or params.get("_session_id") or params.get("session_id")
+
+        # 1. Authenticated Session Verification
+        if self.require_session:
+            if not resolved_session or not await self._is_valid_session(resolved_session):
+                await self._log_audit(command, params, handler.tier, "denied", "Missing or invalid authenticated session", session_id=resolved_session)
+                return CommandResult(
+                    success=False,
+                    error="Missing or invalid authenticated session",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.DENIED,
+                )
+        elif resolved_session is not None:
+            if not await self._is_valid_session(resolved_session):
+                await self._log_audit(command, params, handler.tier, "denied", "Invalid authenticated session", session_id=resolved_session)
+                return CommandResult(
+                    success=False,
+                    error="Invalid authenticated session",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.DENIED,
+                )
+
+        bound_session = resolved_session or "default_session"
+
+        # 2. Permission Tier Enforcement
         if handler.tier not in self.allowed_tiers:
-            await self._log_audit(command, params, handler.tier, "denied", "Permission tier not allowed")
+            await self._log_audit(command, params, handler.tier, "denied", "Permission tier not allowed", session_id=bound_session)
             try:
                 await event_bus.publish(type("Event", (), {
                     "type": CoreEvents.PERMISSION_DENIED,
@@ -753,7 +964,7 @@ class CommandBus:
                 status=CommandStatus.DENIED,
             )
 
-        # 2. Safety Layer Cross-Check
+        # 3. Comprehensive SafetyLayer Evaluation
         safety_action_map = {
             "read_file": "file_read",
             "move_file": "file_modify",
@@ -770,102 +981,173 @@ class CommandBus:
         }
         safety_action = safety_action_map.get(command, command)
         safety_val = self.safety_layer.validate_action(safety_action, params)
-        if safety_val.get("protected_path", False):
-            await self._log_audit(command, params, handler.tier, "denied", f"Safety violation: {safety_val.get('reason')}")
-            return CommandResult(
-                success=False,
-                error=f"Safety violation: {safety_val.get('reason')}",
-                permission_tier=handler.tier,
-                status=CommandStatus.DENIED,
-            )
 
-        # 3. Dry-run handling
-        if self.dry_run:
-            return CommandResult(
-                success=True,
-                result={"dry_run": True, "command": command, "params": params},
-                permission_tier=handler.tier,
-                status=CommandStatus.SUCCESS,
-            )
+        # Reject unconditionally if SafetyLayer denies outright
+        if not safety_val.get("allowed", False):
+            reason = safety_val.get("reason", "Action not allowed by SafetyLayer")
+            requires_approval = safety_val.get("requires_approval", False)
 
-        # 4. Server-Tracked Single-Use Confirmation Challenges (ADR-004)
-        if handler.requires_confirmation:
+            # Protected paths or denied permissions cannot be confirmed or bypassed
+            if safety_val.get("protected_path", False) or "not granted" in reason.lower():
+                await self._log_audit(command, params, handler.tier, "denied", f"Safety violation: {reason}", session_id=bound_session)
+                return CommandResult(
+                    success=False,
+                    error=f"Safety violation: {reason}",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.DENIED,
+                )
+
+            # If not a high/critical risk requiring interactive approval, it is an outright denial
+            if not requires_approval and not handler.requires_confirmation:
+                await self._log_audit(command, params, handler.tier, "denied", f"Safety violation: {reason}", session_id=bound_session)
+                return CommandResult(
+                    success=False,
+                    error=f"Safety violation: {reason}",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.DENIED,
+                )
+
+        needs_confirmation = handler.requires_confirmation or safety_val.get("requires_approval", False)
+
+        # 4. Durable SQLite-Backed Single-Use Confirmation Challenges (ADR-004)
+        if needs_confirmation:
+            db = await self._get_db()
+            if not db:
+                return CommandResult(
+                    success=False,
+                    error="Security failure: Database unavailable for confirmation challenge management",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.FAILED,
+                )
+
+            current_hash = _compute_param_hash(params)
+
             if confirmation_token:
-                # Challenge token provided - verify authenticity and single use
-                challenge = self._pending_challenges.get(confirmation_token)
-                if not challenge:
+                # Challenge token provided - verify challenge details from SQLite
+                challenge = await self._safe_await(db.get_challenge(confirmation_token))
+                if not challenge or not isinstance(challenge, dict):
+                    await self._log_audit(command, params, handler.tier, "denied", "Invalid confirmation challenge token", session_id=bound_session)
                     return CommandResult(
                         success=False,
                         error="Invalid or expired confirmation token",
                         permission_tier=handler.tier,
-                        status=CommandStatus.FAILED,
+                        status=CommandStatus.DENIED,
                     )
                 if challenge.get("status") != "pending":
+                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge already consumed or cancelled", session_id=bound_session)
                     return CommandResult(
                         success=False,
                         error="Confirmation token has already been consumed or cancelled",
                         permission_tier=handler.tier,
-                        status=CommandStatus.FAILED,
+                        status=CommandStatus.DENIED,
                     )
                 if time.time() > challenge.get("expires_at", 0):
-                    challenge["status"] = "expired"
+                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge has expired", session_id=bound_session)
                     return CommandResult(
                         success=False,
                         error="Confirmation token has expired",
                         permission_tier=handler.tier,
-                        status=CommandStatus.FAILED,
+                        status=CommandStatus.DENIED,
                     )
                 if challenge.get("command") != command:
+                    await self._log_audit(command, params, handler.tier, "denied", f"Command mismatch: expected {challenge.get('command')}, got {command}", session_id=bound_session)
                     return CommandResult(
                         success=False,
-                        error="Confirmation command mismatch",
+                        error=f"Command mismatch for confirmation challenge: expected {challenge.get('command')}, got {command}",
                         permission_tier=handler.tier,
                         status=CommandStatus.DENIED,
                     )
-                # Parameter immutability check
-                current_hash = _compute_param_hash(params)
-                if current_hash != challenge.get("param_hash"):
+                if challenge.get("param_hash") != current_hash:
+                    await self._log_audit(command, params, handler.tier, "denied", "Parameters altered since confirmation requested", session_id=bound_session)
                     return CommandResult(
                         success=False,
-                        error="Confirmation parameters altered: parameter hash mismatch",
+                        error="Parameters altered since confirmation requested",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+                chal_session = challenge.get("session_id")
+                if bound_session and chal_session and bound_session != chal_session:
+                    await self._log_audit(command, params, handler.tier, "denied", f"Session mismatch: expected {chal_session}, got {bound_session}", session_id=bound_session)
+                    return CommandResult(
+                        success=False,
+                        error="Session mismatch for confirmation challenge",
                         permission_tier=handler.tier,
                         status=CommandStatus.DENIED,
                     )
 
-                # Atomically consume challenge
-                challenge["status"] = "consumed"
-                challenge["consumed_at"] = time.time()
-                self._pending_challenges.pop(confirmation_token, None)
+                # Atomically consume challenge from SQLite
+                consumed = await self._safe_await(db.consume_challenge(
+                    challenge_id=confirmation_token,
+                    session_id=bound_session,
+                    command=command,
+                    param_hash=current_hash,
+                    now=time.time()
+                ))
+                if not consumed:
+                    await self._log_audit(
+                        command, params, handler.tier, "denied",
+                        "Concurrent confirmation race or challenge already consumed",
+                        session_id=bound_session
+                    )
+                    return CommandResult(
+                        success=False,
+                        error="Confirmation challenge verification failed: concurrent race or already consumed",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+
+                # Re-evaluate Safety policy on confirmed action to catch dynamic policy or permission revocations
+                safety_reval = self.safety_layer.validate_action(safety_action, params)
+                reval_reason = safety_reval.get("reason", "Action not permitted by safety policy")
+                if safety_reval.get("protected_path", False) or "not granted" in reval_reason.lower() or (not safety_reval.get("allowed", False) and not safety_reval.get("requires_approval", False)):
+                    await self._log_audit(command, params, handler.tier, "denied", f"Safety revalidation failed: {reval_reason}", session_id=bound_session)
+                    return CommandResult(
+                        success=False,
+                        error=f"Safety revalidation failed: {reval_reason}",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
             else:
-                # Generate new server-tracked challenge
+                # Generate new durable server-tracked challenge in SQLite
                 token = f"ch_{uuid4().hex}"
                 now = time.time()
-                self._pending_challenges[token] = {
-                    "challenge_id": token,
-                    "command": command,
-                    "param_hash": _compute_param_hash(params),
-                    "params": params,
-                    "handler": handler,
-                    "created_at": now,
-                    "expires_at": now + 300.0,
-                    "status": "pending",
-                }
+                expires_at = now + 300.0
+                params_json = _canonical_json({k: v for k, v in params.items() if not k.startswith("_")})
                 
+                persisted = await self._safe_await(db.create_challenge(
+                    challenge_id=token,
+                    session_id=bound_session,
+                    command=command,
+                    param_hash=current_hash,
+                    params_json=params_json,
+                    prompt=handler.confirmation_prompt,
+                    created_at=now,
+                    expires_at=expires_at
+                ))
+                if not persisted:
+                    return CommandResult(
+                        success=False,
+                        error="Security failure: Unable to persist confirmation challenge to database",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.FAILED,
+                    )
+
                 try:
                     await event_bus.publish(type("Event", (), {
                         "type": CoreEvents.CONFIRMATION_REQUESTED,
                         "data": {
                             "token": token,
                             "challenge_id": token,
+                            "session_id": bound_session,
                             "command": command,
                             "prompt": handler.confirmation_prompt,
                             "params": params,
-                            "expires_at": now + 300.0,
+                            "expires_at": expires_at,
                         }
                     })())
                 except Exception:
                     pass
-                
+
                 return CommandResult(
                     success=False,
                     error=handler.confirmation_prompt or "Confirmation required",
@@ -876,10 +1158,18 @@ class CommandBus:
                     status=CommandStatus.CONFIRMATION_REQUIRED,
                 )
 
-        # 5. Fail-Secure Pre-Flight Audit Logging
-        # Sensitive and Destructive commands fail closed if audit logging fails
+        # 5. Dry-run handling
+        if self.dry_run:
+            return CommandResult(
+                success=True,
+                result={"dry_run": True, "command": command, "params": params},
+                permission_tier=handler.tier,
+                status=CommandStatus.SUCCESS,
+            )
+
+        # 6. Fail-Secure Pre-Flight Audit Logging
         if handler.tier in (PermissionTier.DESTRUCTIVE, PermissionTier.SENSITIVE):
-            logged = await self._log_audit(command, params, handler.tier, "initiating", None)
+            logged = await self._log_audit(command, params, handler.tier, "initiating", None, session_id=bound_session)
             if not logged:
                 return CommandResult(
                     success=False,
@@ -888,13 +1178,13 @@ class CommandBus:
                     status=CommandStatus.FAILED,
                 )
 
-        # 6. Execute Handler
+        # 7. Execute Handler
         try:
             try:
                 res = await handler.execute(params, confirmation=True)
             except TypeError:
                 res = await handler.execute(params)
-            
+
             if not isinstance(res, CommandResult):
                 result = CommandResult(
                     success=True,
@@ -906,16 +1196,17 @@ class CommandBus:
                 result = res
             if result.status is None:
                 result.status = CommandStatus.SUCCESS if result.success else CommandStatus.FAILED
-            
+
             # Post-execution audit logging
             await self._log_audit(
                 command,
                 params,
                 handler.tier,
                 "success" if result.success else "failed",
-                result.error
+                result.error,
+                session_id=bound_session
             )
-            
+
             # Event emission
             try:
                 event_type = CoreEvents.COMMAND_EXECUTED if result.success else CoreEvents.COMMAND_FAILED
@@ -925,12 +1216,12 @@ class CommandBus:
                 })())
             except Exception:
                 pass
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
-            await self._log_audit(command, params, handler.tier, "failed", str(e))
+            await self._log_audit(command, params, handler.tier, "failed", str(e), session_id=bound_session)
             return CommandResult(
                 success=False,
                 error=str(e),
@@ -938,22 +1229,34 @@ class CommandBus:
                 status=CommandStatus.FAILED,
             )
 
-    async def confirm(self, token: str, approved: bool) -> CommandResult:
-        """Handle user confirmation token response with single-use atomic consumption."""
-        if token not in self._pending_challenges:
+    async def confirm(self, token: str, approved: bool, session_id: Optional[str] = None) -> CommandResult:
+        """
+        Handle user confirmation token response with single-use atomic consumption
+        via the unified execute() pipeline.
+        """
+        db = await self._get_db()
+        if not db:
+            return CommandResult(
+                success=False,
+                error="Database unavailable for challenge confirmation",
+                status=CommandStatus.FAILED,
+            )
+
+        challenge = await self._safe_await(db.get_challenge(token))
+        if not challenge or not isinstance(challenge, dict):
             return CommandResult(
                 success=False,
                 error="Invalid or expired confirmation token",
                 status=CommandStatus.FAILED,
             )
-        
-        challenge = self._pending_challenges.pop(token)
+
         if challenge.get("status") != "pending":
             return CommandResult(
                 success=False,
                 error="Confirmation token has already been consumed or cancelled",
                 status=CommandStatus.FAILED,
             )
+
         if time.time() > challenge.get("expires_at", 0):
             return CommandResult(
                 success=False,
@@ -961,65 +1264,39 @@ class CommandBus:
                 status=CommandStatus.FAILED,
             )
 
-        handler = challenge["handler"]
-        params = challenge["params"]
-        
+        bound_session = session_id or challenge.get("session_id")
+        if session_id and challenge.get("session_id") != session_id:
+            return CommandResult(
+                success=False,
+                error="Session mismatch for confirmation challenge",
+                status=CommandStatus.DENIED,
+            )
+
+        command = challenge["command"]
+        handler = self._handlers.get(command)
+        tier = handler.tier if handler else PermissionTier.DESTRUCTIVE
+        try:
+            params = json.loads(challenge["params_json"])
+        except Exception:
+            params = {}
+
         if not approved:
-            challenge["status"] = "cancelled"
-            await self._log_audit(challenge["command"], params, handler.tier, "declined", "User declined confirmation")
+            await self._safe_await(db.cancel_challenge(token, bound_session))
+            await self._log_audit(command, params, tier, "declined", "User declined confirmation", session_id=bound_session)
             return CommandResult(
                 success=False,
                 error="User declined confirmation",
-                permission_tier=handler.tier,
+                permission_tier=tier,
                 status=CommandStatus.DENIED,
             )
-        
-        challenge["status"] = "consumed"
-        challenge["consumed_at"] = time.time()
 
-        # Fail-secure audit log check
-        if handler.tier in (PermissionTier.DESTRUCTIVE, PermissionTier.SENSITIVE):
-            logged = await self._log_audit(challenge["command"], params, handler.tier, "initiating", None)
-            if not logged:
-                return CommandResult(
-                    success=False,
-                    error="Security audit failure: action aborted (fail-secure invariant)",
-                    permission_tier=handler.tier,
-                    status=CommandStatus.FAILED,
-                )
-
-        try:
-            try:
-                res = await handler.execute(params, confirmation=True)
-            except TypeError:
-                res = await handler.execute(params)
-            
-            if not isinstance(res, CommandResult):
-                res = CommandResult(
-                    success=True,
-                    result=res,
-                    permission_tier=handler.tier,
-                    status=CommandStatus.SUCCESS,
-                )
-            elif res.status is None:
-                res.status = CommandStatus.SUCCESS if res.success else CommandStatus.FAILED
-            
-            await self._log_audit(
-                challenge["command"],
-                params,
-                handler.tier,
-                "success" if res.success else "failed",
-                res.error
-            )
-            return res
-        except Exception as e:
-            await self._log_audit(challenge["command"], params, handler.tier, "failed", str(e))
-            return CommandResult(
-                success=False,
-                error=str(e),
-                permission_tier=handler.tier,
-                status=CommandStatus.FAILED,
-            )
+        # Approved: Delegate directly to execute() to enforce the exact same verification and execution path
+        return await self.execute(
+            command=command,
+            params=params,
+            confirmation_token=token,
+            session_id=bound_session,
+        )
     
     async def stop(self) -> None:
         """Stop the Command Bus."""

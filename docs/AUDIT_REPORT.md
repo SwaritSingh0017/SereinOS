@@ -229,15 +229,15 @@ All 12 items have been verified directly in the tracked source code and remediat
 | **V1** | Default Account Credentials in Installer (`serein:serein`) | CRITICAL | **FIXED AND TESTED** | `build_iso.sh` locks default account; `installer_engine.py` removes default password, enforces min length $\ge 8$, blocks trivial passwords; verified by `test_m4_empirical_adversarial_recheck.py`. |
 | **V2** | Passwordless Root Sudo (`NOPASSWD:ALL`) | CRITICAL | **FIXED AND TESTED** | Removed from `build_iso.sh`; replaced with standard `%sudo ALL=(ALL:ALL) ALL`; verified by `test_m4_empirical_adversarial_recheck.py`. |
 | **V3** | Permission Tiers Auto-Granted in SafetyLayer | HIGH | **FIXED AND TESTED** | `safety_layer.py:request_permission()` no longer auto-grants permissions; returns `False` pending explicit UI confirmation; verified by `test_stage1_security_adversarial.py`. |
-| **V4** | Unbound Stateless Confirmation Tokens | CRITICAL | **FIXED AND TESTED** | Replaced with server-tracked challenges with 300s TTL, canonical JSON SHA-256 parameter hashing, and atomic consumption; verified by `test_stage1_security_adversarial.py`. |
-| **V5** | Bypassed Safety Layer & Subsystem Disconnect | CRITICAL | **FIXED AND TESTED** | `command_bus.py` now enforces `safety_layer.validate_action()`; `safety_layer.py` uses canonical `Path.resolve()` containment checking; verified by `test_command_bus_enforces_safety_layer`. |
+| **V4** | Unbound Stateless Confirmation Tokens & Replay Races | CRITICAL | **FIXED AND TESTED** | Replaced with durable SQLite-backed `confirmation_challenges` table with atomic single-use status transition (`UPDATE ... WHERE status='pending'`), session binding to authenticated UI session, exact command and canonical parameter hashing (`SHA256(canonical_json(params))`), 300s TTL, cancellation, and concurrent race protection. Unified across all entry points (`execute()`, `confirm()`, D-Bus); verified by `test_stage1_security_adversarial.py`. |
+| **V5** | Bypassed Safety Layer & Subsystem Disconnect | CRITICAL | **FIXED AND TESTED** | `command_bus.py` now enforces `safety_layer.validate_action()` across all actions, rejecting outright when not allowed and not approval-gated; re-evaluates SafetyLayer policy upon confirmation approval to catch dynamic permission revocations; canonical `Path.resolve()` containment checking; verified by `test_command_bus_enforces_safety_layer` and `test_safety_revalidation_after_confirmation`. |
 | **V6** | Browser Media Consent Bypass (`--use-fake-ui-for-media-stream`) | HIGH | **FIXED AND TESTED** | Removed bypass flags from `install_artifacts_container.sh`; verified by `test_install_artifacts_container_script_stages_plymouth_and_installer`. |
 | **V7** | Arbitrary File Operations & Unchecked Traversal | CRITICAL | **FIXED AND TESTED** | `validate_safe_path()` resolves canonical paths, blocks traversal (`../`), symlink escapes, system roots; user deletions redirect to Freedesktop Trash; verified by `test_stage1_security_adversarial.py`. |
-| **V8** | Server-Side Request Forgery (SSRF) & DNS Rebinding | HIGH | **FIXED AND TESTED** | `command_bus.network_request` performs DNS pre-flight checking, blocking loopback, link-local, private RFC1918 CIDRs, and reserved IPs; verified by `test_stage1_security_adversarial.py`. |
-| **V9** | Arbitrary Subprocess Launch & Command Injection | CRITICAL | **FIXED AND TESTED** | Strict `APPROVED_APPLICATIONS` whitelist enforced; shell metacharacters rejected; arbitrary binaries blocked; verified by `test_stage1_security_adversarial.py`. |
+| **V8** | Server-Side Request Forgery (SSRF) & DNS Rebinding | HIGH | **FIXED AND TESTED** | Socket-level IP pinning via `PinnedIPResolver` eliminates DNS rebinding TOCTOU; pre-flight DNS validation blocks IPv4/IPv6 loopback, link-local, private RFC1918 CIDRs, multicast, IPv4-mapped IPv6, and reserved IPs; manual redirect loop (max 5 hops) re-validates destination IP before connecting; verified by `test_stage1_security_adversarial.py`. |
+| **V9** | Arbitrary Subprocess Launch & Command Injection | CRITICAL | **FIXED AND TESTED** | Strict `APPROVED_APPLICATIONS` whitelist enforced; shell metacharacters rejected; arbitrary binaries blocked; package installation hardened with package name regex `^[a-zA-Z0-9][a-zA-Z0-9_\-\.\+]{0,63}$`, manager allowlist, and `--` argument delimiter; verified by `test_stage1_security_adversarial.py`. |
 | **V10** | Unrestricted Self-Evolution & Host Overwrites | CRITICAL | **FIXED AND TESTED** | `self_evolution.py` enforces canonical `is_relative_to(repo_root)` validation and bans absolute paths; `agent_sandbox.py` strictly raises `PermissionError` without Docker/Podman; verified by `test_stage1_security_adversarial.py`. |
 | **V11** | Secrets in World-Readable Files & PRAGMA SQLi | HIGH | **FIXED AND TESTED** | `config.py` enforces `0600` permissions on secret files and `0700` on directories, masks API keys; `database.py` validates and escapes encryption key; verified by `test_stage1_security_adversarial.py`. |
-| **V12** | Silent Audit Log Suppression & Missing Forensic Record | MEDIUM | **FIXED AND TESTED** | `command_bus._log_audit()` fails closed for sensitive/destructive operations if audit logging fails (`Security audit failure: action aborted`); denied actions logged; verified by `test_destructive_action_fails_closed_when_audit_fails`. |
+| **V12** | Silent Audit Log Suppression & Missing Forensic Record | MEDIUM | **FIXED AND TESTED** | `command_bus._log_audit()` fails closed for sensitive/destructive operations if audit logging fails (`Security audit failure: action aborted (fail-secure invariant)`); denied actions logged; verified by `test_destructive_action_fails_closed_when_audit_fails`. |
 
 ```mermaid
 flowchart TD
@@ -318,23 +318,12 @@ flowchart TD
 - **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/command_bus.py:513-529`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L513-L529):
-    ```python
-    if handler.requires_confirmation:
-        if confirmation_token:
-            pending = self._pending_confirmations.pop(confirmation_token, None)
-            if not pending:
-                return CommandResult(success=False, error="Invalid or expired confirmation token")
-        else:
-            token = str(uuid4())
-            self._pending_confirmations[token] = {
-                "command": command, "params": params, "handler": handler
-            }
-    ```
-  - [`serein-core/src/serein_core/command_bus.py:556`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L556):
-    `res = await handler.execute(params, confirmation=True)`
+    Legacy implementation stored tokens in an in-memory dictionary `_pending_confirmations` without session binding or canonical parameter hashing.
+  - [`serein-core/src/serein_core/command_bus.py:1010-1120`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L1010-L1120):
+    Remediated implementation persists challenges in SQLite `confirmation_challenges` table with atomic single-use status transition (`UPDATE ... SET status='consumed' ... WHERE status='pending'`), session binding to authenticated UI session, exact command and canonical parameter hashing (`SHA256(canonical_json(params))`), 300s TTL, cancellation, and protection against concurrent confirmation races.
 - **Severity:** **CRITICAL**
-- **Impact:** When a valid `confirmation_token` is provided, `execute()` proceeds to execute the *currently passed* `command` and `params`, rather than verifying that they match the stored `pending["command"]` and `pending["params"]`. An attacker can request confirmation for a benign action (`read_file`), obtain a token, and supply it to execute `delete_file` with `/etc/passwd`. Additionally, tokens have no expiration timestamp (TTL).
-- **Remediation:** Bind tokens cryptographically to `HMAC_SHA256(command + canonical_json(params) + timestamp)`. Reject execution if parameters differ or if token is older than 300 seconds.
+- **Impact:** An attacker could request confirmation for a benign action, obtain a token, and supply it to execute a destructive action with substituted parameters or commands. Additionally, in-memory tokens did not survive daemon restart and were vulnerable to concurrent race conditions.
+- **Remediation:** Durable SQLite-backed `confirmation_challenges` table. Exact parameter hash comparison, session binding to `SecurityManager` or active session, 300-second expiration, cancellation on decline, and unified execution pipeline across CLI, D-Bus, and web APIs. Tested with parameter substitution, command tampering, process restarts, concurrent race attempts, and replay attacks.
 
 ---
 
@@ -342,19 +331,12 @@ flowchart TD
 - **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
   - [`serein-core/src/serein_core/safety_layer.py:223-232`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/safety_layer.py#L223-L232):
-    ```python
-    def _is_protected_path(self, path: str) -> bool:
-        path_lower = path.lower()
-        for category, paths in self.PROTECTED_PATHS.items():
-            for protected in paths:
-                if protected.lower() in path_lower:
-                    return True
-        return False
-    ```
-  - [`serein-core/src/serein_core/command_bus.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py): Does **not** import or call `SafetyLayer` or `_is_protected_path`!
+    Legacy `_is_protected_path` used naive substring matching.
+  - [`serein-core/src/serein_core/command_bus.py:955-1000`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L955-L1000) & [`1095-1110`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L1095-L1110):
+    `CommandBus.execute()` now evaluates `SafetyLayer.validate_action()` across all actions, rejecting outright when not allowed and not approval-gated; re-evaluates SafetyLayer policy upon confirmation approval to catch dynamic permission revocations; canonical `Path.resolve()` containment checking.
 - **Severity:** **CRITICAL**
-- **Impact:** `SafetyLayer` is completely bypassed during live command execution. Furthermore, `_is_protected_path` uses naive substring matching instead of path resolution (`Path.resolve()`), enabling trivial path traversal bypasses (e.g. `/home/serein/../etc/passwd`).
-- **Remediation:** Connect `SafetyLayer` directly into `CommandBus.execute()`. Implement canonical path resolution and strict boundary containment (`path.resolve().is_relative_to(...)`).
+- **Impact:** `SafetyLayer` was bypassed during live command execution. Naive substring matching enabled path traversal bypasses.
+- **Remediation:** Enforce `SafetyLayer.validate_action()` in the `CommandBus.execute()` pipeline. Perform canonical path resolution and strict boundary containment (`path.resolve().is_relative_to(...)`). Revalidate policy upon confirmation consumption before handler execution.
 
 ---
 
@@ -392,33 +374,26 @@ flowchart TD
 
 ---
 
-### Vulnerability 8: Unrestricted Network Requests (SSRF)
+### Vulnerability 8: Unrestricted Network Requests (SSRF & DNS Rebinding)
 - **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
-  - [`serein-core/src/serein_core/command_bus.py:311-329`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L311-L329):
-    ```python
-    async with aiohttp.ClientSession() as session:
-        async with session.request(method, url, headers=headers, json=data) as resp:
-            text = await resp.text()
-    ```
+  - [`serein-core/src/serein_core/command_bus.py:165-189`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L165-L189) (`PinnedIPResolver`): Custom aiohttp resolver pinning socket connection to validated IP address.
+  - [`serein-core/src/serein_core/command_bus.py:598-708`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L598-L708) (`SensitiveHandlers.network_request`): Pre-flight DNS validation, IP pinning, manual redirect loop with destination IP revalidation.
 - **Severity:** **HIGH**
-- **Impact:** Arbitrary HTTP requests can be sent to internal loopback services (`http://127.0.0.1:8000`, `http://localhost:8080`), local network devices, or cloud metadata endpoints (`http://169.254.169.254`).
-- **Remediation:** Disallow loopback, private IPv4/IPv6 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`), and enforce a domain allowlist for external calls.
+- **Impact:** Arbitrary HTTP requests could be sent to loopback services (`http://127.0.0.1`), local network devices (`192.168.0.0/16`), or cloud metadata endpoints (`169.254.169.254`). Time-of-check to time-of-use DNS rebinding could allow an attacker to bypass IP filtering.
+- **Remediation:** Pre-flight DNS resolution with CIDR exclusion (IPv4/IPv6 loopback, RFC1918 private, link-local, multicast, IPv4-mapped IPv6, carrier-grade NAT). Socket-level IP pinning via `PinnedIPResolver` to prevent DNS rebinding while preserving TLS SNI and cert verification. Manual redirect loop (max 5 hops, `allow_redirects=False`) that validates every destination IP.
 
 ---
 
 ### Vulnerability 9: Arbitrary Subprocess Execution & Command Injection
 - **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
-  - [`serein-core/src/serein_core/command_bus.py:155-166`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L155-L166):
-    ```python
-    proc = await asyncio.create_subprocess_exec(app, *args)
-    ```
-  - [`serein-core/src/serein_core/agent_sandbox.py:200-213`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/agent_sandbox.py#L200-L213):
-    `proc = await asyncio.create_subprocess_exec(*cmd)` on the host when Docker is absent.
+  - [`serein-core/src/serein_core/command_bus.py:350-405`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L350-L405) (`launch_app`): Strict `APPROVED_APPLICATIONS` allowlist.
+  - [`serein-core/src/serein_core/command_bus.py:542-592`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L542-L592) (`install_package`): Strict regex validation `^[a-zA-Z0-9][a-zA-Z0-9_\-\.\+]{0,63}$`, manager allowlist (`apt`, `pacman`, `flatpak`, `snap`), and `--` argument delimiter.
+  - [`serein-core/src/serein_core/agent_sandbox.py:200-213`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/agent_sandbox.py#L200-L213): Raises `PermissionError` when container isolation is unavailable.
 - **Severity:** **CRITICAL**
-- **Impact:** `launch_app` accepts arbitrary binaries with arbitrary arguments. If an AI prompt outputs `launch_app(app="rm", args=["-rf", "/"])` or `launch_app(app="nc", args=["-e", "/bin/sh"])`, it is executed directly on the host operating system.
-- **Remediation:** Whitelist permissible applications (e.g. `chromium`, `alacritty`, `foot`, `mpv`) mapped to verified `.desktop` files. Prohibit passing arbitrary executable paths.
+- **Impact:** `launch_app` and `install_package` could execute arbitrary binaries or inject command flags directly onto the host operating system.
+- **Remediation:** Application allowlist mapped to verified desktop binaries. Strict regex sanitization and `--` argument separation on package installation. Hard container isolation gate for autonomous agent executions.
 
 ---
 
@@ -453,15 +428,13 @@ flowchart TD
 ### Vulnerability 12: Audit Logging Failures & Missing Security Events
 - **Stage 1 Remediation Status:** **FIXED AND TESTED**
 - **File & Line References:**
-  - [`serein-core/src/serein_core/command_bus.py:585-586`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L585-L586):
-    ```python
-    except Exception:
-        pass
-    ```
-  - [`serein-core/src/serein_core/command_bus.py:495-500`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L495-L500): Permission denied attempts are returned without logging to the database audit table.
+  - [`serein-core/src/serein_core/command_bus.py:880-896`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L880-L896):
+    `_log_audit()` logs all decisions, authorized executions, security denials, and failures to SQLite forensic log.
+  - [`serein-core/src/serein_core/command_bus.py:1165-1175`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py#L1165-L1175):
+    Pre-flight audit logging for destructive and sensitive actions: if audit logging fails, execution aborts immediately (`Security audit failure: action aborted (fail-secure invariant)`).
 - **Severity:** **MEDIUM**
-- **Impact:** When database logging fails, exceptions are silently ignored, allowing commands to run with zero audit trail. Unauthorized access attempts leave no forensic record.
-- **Remediation:** Audit logging must be fail-secure: if the audit logger fails, destructive commands must abort. All authorization failures must be logged to a dedicated, write-ahead security log.
+- **Impact:** Silent exception handling allowed destructive actions to execute without audit trail, and unauthorized attempts were not recorded.
+- **Remediation:** Fail-secure audit enforcement: sensitive and destructive operations abort if audit logging fails. All denied attempts and validation failures are recorded to durable storage.
 
 ---
 

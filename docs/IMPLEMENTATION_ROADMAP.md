@@ -47,20 +47,20 @@ flowchart TD
   - [`serein-core/src/serein_core/self_evolution.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/self_evolution.py) (Enforce repository containment on patch application; ban absolute paths).
   - [`serein-core/src/serein_core/agent_sandbox.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/agent_sandbox.py) (Raise `PermissionError` when container isolation is missing, preventing direct host execution).
   - [`serein-core/src/serein_core/web_app.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/web_app.py) (Remove hardcoded default password from API models and installer handlers).
-  - [`serein-core/tests/test_stage1_security_adversarial.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_stage1_security_adversarial.py) (19 dedicated adversarial test cases covering all 12 vulnerabilities).
+  - [`serein-core/tests/test_stage1_security_adversarial.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_stage1_security_adversarial.py) (28 dedicated adversarial test cases covering all 12 vulnerabilities and attack permutations).
 - **Remediation Summary:**
   1. **V1 (Default Credentials):** **FIXED AND TESTED**
   2. **V2 (NOPASSWD:ALL Sudo):** **FIXED AND TESTED**
   3. **V3 (Auto-Granted Permissions):** **FIXED AND TESTED**
-  4. **V4 (Unbound Confirmation Tokens):** **FIXED AND TESTED**
-  5. **V5 (Bypassed Safety Layer):** **FIXED AND TESTED**
+  4. **V4 (Unbound Confirmation Tokens & In-Memory Storage):** **FIXED AND TESTED** (Remediated with durable SQLite-backed `confirmation_challenges` table, atomic single-use consumption, session binding, parameter and command hashing, 300s TTL, cancellation, and concurrent race protection across all entry points).
+  5. **V5 (Bypassed Safety Layer):** **FIXED AND TESTED** (Remediated with mandatory `SafetyLayer.validate_action()` evaluation on all executions, fail-secure rejection of non-path and path actions, and safety revalidation after confirmation approval).
   6. **V6 (Browser Media Consent Bypass):** **FIXED AND TESTED**
   7. **V7 (Arbitrary File Deletion / Traversal):** **FIXED AND TESTED**
-  8. **V8 (SSRF / DNS Rebinding):** **FIXED AND TESTED**
-  9. **V9 (Arbitrary App Launch / Shell Injection):** **FIXED AND TESTED**
+  8. **V8 (SSRF / DNS Rebinding):** **FIXED AND TESTED** (Remediated with socket-level IP pinning via `PinnedIPResolver`, CIDR exclusion of loopback/private/metadata ranges, and manual redirect loop with destination revalidation).
+  9. **V9 (Arbitrary App Launch / Shell Injection):** **FIXED AND TESTED** (Remediated with application allowlist, package name regex `^[a-zA-Z0-9][a-zA-Z0-9_\-\.\+]{0,63}$`, manager allowlist, and `--` argument delimiter).
   10. **V10 (Unrestricted Self-Evolution / Host Escape):** **FIXED AND TESTED**
   11. **V11 (Secrets in Plaintext / PRAGMA SQLi):** **FIXED AND TESTED**
-  12. **V12 (Silent Audit Log Suppression):** **FIXED AND TESTED**
+  12. **V12 (Silent Audit Log Suppression):** **FIXED AND TESTED** (Remediated with fail-secure abort: sensitive/destructive operations immediately abort if audit logging fails).
 - **Dependencies:** None (Baseline pre-flight stage).
 - **Acceptance Criteria:**
   1. No default or hardcoded password exists anywhere in `build_iso.sh`, `installer_engine.py`, or `web_app.py`.
@@ -68,14 +68,16 @@ flowchart TD
   3. Browser kiosk launch script does not include `--use-fake-ui-for-media-stream`.
   4. Configuration file writing sets POSIX file mode to `0600` (read/write by owner only).
   5. PRAGMA key operations safely quote or validate encryption keys to prevent SQL injection.
-  6. All 12 critical vulnerabilities verified remediated with 0 regressions.
+  6. Confirmation challenges survive process restart in persistent SQLite and prevent concurrent race consumption.
+  7. Socket connections pin validated IPs to eliminate DNS rebinding TOCTOU attacks.
+  8. All 12 critical vulnerabilities verified remediated with 0 regressions.
 - **Test Commands & Results:**
   ```powershell
-  pytest serein-core/tests/test_stage1_security_adversarial.py -v   # 18 passed, 1 skipped (0.71s)
-  pytest tests/test_m4_empirical_adversarial_recheck.py -v          # 36 passed (1.93s)
-  pytest serein-core/tests/test_security_audit.py -v                # 7 passed (3.11s)
+  pytest serein-core/tests/test_stage1_security_adversarial.py -v   # 27 passed, 1 skipped (2.61s)
+  pytest tests/test_m4_empirical_adversarial_recheck.py -v          # 36 passed (1.92s)
+  pytest serein-core/tests/test_security_audit.py -v                # 7 passed (3.37s)
   pytest serein-core/tests/test_command_bus.py -v                   # 10 passed (0.96s)
-  pytest serein-core/tests/test_m2_brain.py -v                      # 18 passed (1.97s)
+  pytest serein-core/tests/test_m2_brain.py -v                      # 18 passed (2.15s)
   ```
 - **Rollback Strategy:** `git checkout HEAD -- serein-installer/ serein-core/`
 - **Lock Condition:** All security audit and adversarial assertions pass; zero plaintext default credentials or unescaped pragmas detected by static scans; fail-secure behavior verified. Stage 1 is officially **LOCKED**.

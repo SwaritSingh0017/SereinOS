@@ -176,41 +176,46 @@ graph TD
   ```python
   import socket
   import ipaddress
+  import aiohttp
+  import aiohttp.abc
 
-  BLOCKED_NETWORKS = [
-      ipaddress.ip_network("127.0.0.0/8"),      # IPv4 Loopback
-      ipaddress.ip_network("::1/128"),          # IPv6 Loopback
-      ipaddress.ip_network("10.0.0.0/8"),       # RFC1918 Private
-      ipaddress.ip_network("172.16.0.0/12"),    # RFC1918 Private
-      ipaddress.ip_network("192.168.0.0/16"),   # RFC1918 Private
-      ipaddress.ip_network("169.254.0.0/16"),   # Link-Local / Cloud Metadata
+  BLOCKED_CIDRS = [
+      ipaddress.ip_network("127.0.0.0/8"),      # IPv4 loopback
+      ipaddress.ip_network("::1/128"),          # IPv6 loopback
+      ipaddress.ip_network("10.0.0.0/8"),       # RFC1918
+      ipaddress.ip_network("172.16.0.0/12"),    # RFC1918
+      ipaddress.ip_network("192.168.0.0/16"),   # RFC1918
+      ipaddress.ip_network("169.254.0.0/16"),   # Link-local / metadata
+      ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
+      ipaddress.ip_network("fc00::/7"),         # IPv6 unique local
+      ipaddress.ip_network("::ffff:0:0/96"),    # IPv4-mapped IPv6
       ipaddress.ip_network("0.0.0.0/8"),        # Current network
       ipaddress.ip_network("224.0.0.0/4"),      # Multicast
   ]
 
-  async def safe_network_fetch(url: str, method: str = "GET", headers: dict = None):
-      parsed = urllib.parse.urlparse(url)
-      hostname = parsed.hostname
-      port = parsed.port or (443 if parsed.scheme == "https" else 80)
-      
-      # 1. Resolve IP explicitly
-      addr_info = await asyncio.get_event_loop().getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-      target_ip_str = addr_info[0][4][0]
-      target_ip = ipaddress.ip_address(target_ip_str)
-      
-      # 2. Check against blocked ranges
-      for net in BLOCKED_NETWORKS:
-          if target_ip in net:
-              raise SecurityException(f"Connection to prohibited IP address {target_ip} rejected.")
-              
-      # 3. Prevent DNS Rebinding: Connect directly to the validated IP, preserving Host header
-      connector = aiohttp.TCPConnector()
-      # Pass Host header matching hostname for TLS SNI and virtual hosting
+  class PinnedIPResolver(aiohttp.abc.AbstractResolver):
+      """Custom resolver forcing TCP socket connections strictly to pre-validated IP."""
+      def __init__(self, hostname: str, pinned_ip: str, port: int, family: int):
+          self.hostname = hostname
+          self.pinned_ip = pinned_ip
+          self.port = port
+          self.family = family
+
+      async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[dict]:
+          return [{
+              "hostname": self.hostname,
+              "host": self.pinned_ip,
+              "port": self.port if self.port else port,
+              "family": self.family,
+              "proto": socket.IPPROTO_TCP,
+              "flags": 0,
+          }]
   ```
+  - **Manual Redirect Revalidation:** Redirects are never followed automatically (`allow_redirects=False`). A loop processes up to 5 redirect hops, resolving and validating the destination IP of every redirect hop before opening a socket connection.
 
 ### 3.5 Arbitrary Subprocess & Command Injection
-- **Attack Scenario:** An input requests `launch_app(app="rm -rf /")` or `launch_app(app="/bin/sh", args=["-c", "..."])`.
-- **Mitigation: Strict Application Whitelisting:**
+- **Attack Scenario:** An input requests `launch_app(app="rm -rf /")` or `install_package(package="curl; rm -rf /")`.
+- **Mitigation: Strict Application Whitelisting & Package Name Sanitization:**
   - `CommandBus.launch_app` maintains a deterministic dictionary of approved desktop applications:
     ```python
     APPROVED_APPLICATIONS = {
@@ -218,6 +223,15 @@ graph TD
         "browser": "/usr/bin/chromium",
         "files": "/usr/bin/thunar",
         "editor": "/usr/bin/gedit",
+        "media_player": "/usr/bin/mpv",
+        "calculator": "/usr/bin/gnome-calculator",
+        "system_monitor": "/usr/bin/htop",
+    }
+    ```
+  - `CommandBus.install_package` enforces:
+    - Package manager allowlist: `{"apt", "pacman", "flatpak", "snap"}`.
+    - Package name regex: `^[a-zA-Z0-9][a-zA-Z0-9_\-\.\+]{0,63}$`.
+    - Double dash (`--`) delimiter between flags and package names to prevent flag injection.
         "calc": "/usr/bin/gnome-calculator"
     }
     ```

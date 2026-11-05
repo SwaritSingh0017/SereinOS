@@ -209,6 +209,20 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     updated_at TEXT NOT NULL
 );
 
+-- Confirmation Challenges (durable server-tracked confirmation tokens)
+CREATE TABLE IF NOT EXISTS confirmation_challenges (
+    challenge_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    param_hash TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    prompt TEXT,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    status TEXT DEFAULT 'pending',  -- 'pending', 'consumed', 'cancelled', 'expired'
+    consumed_at REAL
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
@@ -218,6 +232,8 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_fires_at ON scheduled_events(fires_at);
 CREATE INDEX IF NOT EXISTS idx_actions_timestamp ON system_actions_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON system_events(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON conversation_messages(session_id, timestamp ASC);
+CREATE INDEX IF NOT EXISTS idx_challenges_lookup ON confirmation_challenges(challenge_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_challenges_status ON confirmation_challenges(status, expires_at);
 """
 
 
@@ -578,6 +594,91 @@ class Database:
             await self.execute("""
                 UPDATE conversation_sessions SET ended_at = ? WHERE id = ?
             """, (now, session_id))
+
+    # Confirmation challenges (durable server-tracked confirmation tokens)
+    async def create_challenge(
+        self,
+        challenge_id: str,
+        session_id: str,
+        command: str,
+        param_hash: str,
+        params_json: str,
+        prompt: Optional[str],
+        created_at: float,
+        expires_at: float
+    ) -> bool:
+        """Store a confirmation challenge in SQLite."""
+        try:
+            await self.execute("""
+                INSERT INTO confirmation_challenges 
+                (challenge_id, session_id, command, param_hash, params_json, prompt, created_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """, (challenge_id, session_id, command, param_hash, params_json, prompt, created_at, expires_at))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create challenge in DB: {e}")
+            return False
+
+    async def get_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve challenge details."""
+        try:
+            row = await self.fetch_one(
+                "SELECT * FROM confirmation_challenges WHERE challenge_id = ?",
+                (challenge_id,)
+            )
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to fetch challenge from DB: {e}")
+            return None
+
+    async def consume_challenge(
+        self,
+        challenge_id: str,
+        session_id: str,
+        command: str,
+        param_hash: str,
+        now: float
+    ) -> bool:
+        """
+        Atomically consume a single-use challenge.
+        Guarantees single use, prevents race conditions, and validates parameter/session immutability.
+        Returns True iff exactly 1 row was updated.
+        """
+        try:
+            cursor = await self.execute("""
+                UPDATE confirmation_challenges
+                SET status = 'consumed', consumed_at = ?
+                WHERE challenge_id = ?
+                  AND session_id = ?
+                  AND command = ?
+                  AND param_hash = ?
+                  AND status = 'pending'
+                  AND expires_at > ?
+            """, (now, challenge_id, session_id, command, param_hash, now))
+            return cursor.rowcount == 1
+        except Exception as e:
+            logger.error(f"Failed to consume challenge in DB: {e}")
+            return False
+
+    async def cancel_challenge(self, challenge_id: str, session_id: Optional[str] = None) -> bool:
+        """Cancel a pending challenge."""
+        try:
+            if session_id:
+                cursor = await self.execute("""
+                    UPDATE confirmation_challenges
+                    SET status = 'cancelled'
+                    WHERE challenge_id = ? AND session_id = ? AND status = 'pending'
+                """, (challenge_id, session_id))
+            else:
+                cursor = await self.execute("""
+                    UPDATE confirmation_challenges
+                    SET status = 'cancelled'
+                    WHERE challenge_id = ? AND status = 'pending'
+                """, (challenge_id,))
+            return cursor.rowcount == 1
+        except Exception as e:
+            logger.error(f"Failed to cancel challenge in DB: {e}")
+            return False
 
     async def save_message(self, message: Dict[str, Any]) -> str:
         """Save a conversation turn (user, assistant, or system)."""

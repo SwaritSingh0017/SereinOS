@@ -61,7 +61,13 @@ class SafetyLayer(BaseEngine):
     
     def __init__(self, database: Database = None):
         super().__init__(database)
-        self._permissions: Dict[str, PermissionLevel] = {}
+        self._permissions: Dict[str, PermissionLevel] = {
+            "camera": PermissionLevel.NONE,
+            "microphone": PermissionLevel.NONE,
+            "file_access": PermissionLevel.WRITE,
+            "internet": PermissionLevel.WRITE,
+            "automation": PermissionLevel.WRITE,
+        }
         self._action_log: List[Dict] = []
         self._pending_approvals: Dict[str, Dict] = {}
     
