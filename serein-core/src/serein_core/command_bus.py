@@ -717,7 +717,8 @@ class CommandBus:
     
     def __init__(self, allowed_tiers: Optional[Set[PermissionTier]] = None, dry_run: bool = False,
                  safety_layer: Optional[SafetyLayer] = None, database: Optional[Any] = None,
-                 require_session: bool = False):
+                 require_session: bool = False,
+                 revocation_journal_path: Optional[Path] = None):
         self.bus: Optional[MessageBus] = None
         bus_cfg = getattr(config, "command_bus", None)
         self.service_name = getattr(bus_cfg, "dbus_service_name", "os.serein.CommandBus") if bus_cfg else "os.serein.CommandBus"
@@ -727,7 +728,10 @@ class CommandBus:
         self.safety_layer = safety_layer or SafetyLayer()
         self.db = database
         self.require_session = require_session
-        self._revoked_tokens: Set[str] = set()
+        self._journal_path: Optional[Path] = Path(revocation_journal_path) if revocation_journal_path else None
+        self._revocation_lock = asyncio.Lock()
+        self._unresolved_revocations: Set[str] = self._read_revocation_journal()
+        self._revoked_tokens: Set[str] = self._unresolved_revocations  # Backward-compatible alias
         self._handlers: Dict[str, CommandHandler] = {}
         self._register_handlers()
 
@@ -747,10 +751,140 @@ class CommandBus:
             return await obj
         return obj
 
+    def _get_revocation_journal_path(self) -> Path:
+        """
+        Get the durable on-disk path for the revocation recovery journal.
+        Always resides next to the underlying database file.
+        """
+        if self._journal_path is not None:
+            return self._journal_path
+
+        if self.db is not None and hasattr(self.db, "path") and self.db.path:
+            return Path(str(self.db.path) + ".revocations")
+
+        try:
+            from serein_core.config import load_config
+            cfg = load_config()
+            return Path(str(cfg.database.path) + ".revocations")
+        except Exception:
+            return Path.home() / ".local" / "share" / "serein" / "revocations.journal"
+
+    def _read_revocation_journal(self) -> Set[str]:
+        """Read all unresolved revoked tokens from the durable on-disk journal."""
+        journal_path = self._get_revocation_journal_path()
+        tokens: Set[str] = set()
+        if not journal_path.exists():
+            return tokens
+        try:
+            with open(journal_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    t = line.strip()
+                    if t and not t.startswith("#"):
+                        tokens.add(t)
+        except Exception as e:
+            logger.error(f"Error reading revocation journal '{journal_path}': {e}")
+        return tokens
+
+    def _write_revocation_journal(self, token: str) -> bool:
+        """
+        Atomically and durably append a revoked token to the on-disk journal.
+        Fsyncs to disk to guarantee survival across process termination.
+        """
+        journal_path = self._get_revocation_journal_path()
+        try:
+            journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(journal_path, "a", encoding="utf-8") as f:
+                f.write(f"{token}\n")
+                f.flush()
+                os.fsync(f.fileno())
+            if os.name == "posix":
+                try:
+                    os.chmod(journal_path, 0o600)
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            logger.error(f"Failed to durably write to revocation journal '{journal_path}': {e}")
+            return False
+
+    def _prune_revocation_journal(self, tokens_to_remove: Set[str]) -> bool:
+        """
+        Prune reconciled tokens from the on-disk journal using atomic replace.
+        """
+        if not tokens_to_remove:
+            return True
+        journal_path = self._get_revocation_journal_path()
+        if not journal_path.exists():
+            return True
+        try:
+            remaining = set()
+            with open(journal_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    t = line.strip()
+                    if t and not t.startswith("#") and t not in tokens_to_remove:
+                        remaining.add(t)
+
+            tmp_path = journal_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                for t in remaining:
+                    f.write(f"{t}\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, journal_path)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to prune revocation journal '{journal_path}': {e}")
+            return False
+
+    def _is_token_revoked_or_unresolved(self, token: str) -> bool:
+        """
+        Check if a session token has been revoked or has an unresolved revocation.
+        Checks both in-memory cache and the durable on-disk journal.
+        """
+        if token in self._unresolved_revocations:
+            return True
+        journal_tokens = self._read_revocation_journal()
+        if token in journal_tokens:
+            self._unresolved_revocations.add(token)
+            return True
+        return False
+
+    async def reconcile_revocations(self) -> int:
+        """
+        Reconcile pending journal revocations with the primary SQLite database.
+        Updates authenticated_sessions SET revoked = 1 for all pending tokens.
+        Prunes confirmed tokens from the journal.
+        Returns number of successfully reconciled sessions.
+        """
+        db = await self._get_db()
+        if db is None or not hasattr(db, "revoke_auth_session"):
+            return 0
+
+        async with self._revocation_lock:
+            unresolved = set(self._unresolved_revocations) | self._read_revocation_journal()
+            if not unresolved:
+                return 0
+
+            reconciled = set()
+            for token in unresolved:
+                try:
+                    success = await self._safe_await(db.revoke_auth_session(token))
+                    if success:
+                        reconciled.add(token)
+                except Exception as e:
+                    logger.debug(f"Failed to reconcile token '{token}' in SQLite: {e}")
+
+            if reconciled:
+                self._unresolved_revocations -= reconciled
+                self._prune_revocation_journal(reconciled)
+
+            return len(reconciled)
+
     async def _is_valid_session(self, session_id: Optional[str]) -> bool:
         """
         Validate if session_id corresponds to an active, authenticated UI/daemon session.
         Strict fail-closed invariant:
+        - Rejects authentication if token is in durable revocation journal or unresolved set.
         - Rejects authentication whenever SQLite validation fails or database is unavailable.
         - Never falls back to accepting an in-memory session.
         - Checks SQLite authenticated_sessions (revoked=0, not expired) and synchronizes valid sessions.
@@ -759,7 +893,20 @@ class CommandBus:
         if not session_id or not str(session_id).strip():
             return False
 
-        if session_id in getattr(self, "_revoked_tokens", set()):
+        # Invariant 1: Check durable journal and unresolved revocation set
+        if self._is_token_revoked_or_unresolved(session_id):
+            from serein_core.auth import security_manager
+            security_manager.logout(session_id)
+            # Opportunistic reconciliation if DB is available
+            try:
+                db = await self._get_db()
+                if db and hasattr(db, "revoke_auth_session"):
+                    reconciled = await self._safe_await(db.revoke_auth_session(session_id))
+                    if reconciled:
+                        self._unresolved_revocations.discard(session_id)
+                        self._prune_revocation_journal({session_id})
+            except Exception:
+                pass
             return False
 
         from serein_core.auth import security_manager
@@ -774,6 +921,11 @@ class CommandBus:
             auth_row = await self._safe_await(db.validate_auth_session(session_id))
             if not auth_row:
                 # Session not found, revoked (revoked=1), or expired in SQLite
+                security_manager.logout(session_id)
+                return False
+
+            # Invariant 2: Double check journal in case concurrent revocation occurred
+            if self._is_token_revoked_or_unresolved(session_id):
                 security_manager.logout(session_id)
                 return False
 
@@ -838,48 +990,61 @@ class CommandBus:
             security_manager.logout(token)
             return None
 
-        if hasattr(self, "_revoked_tokens"):
-            self._revoked_tokens.discard(token)
+        if hasattr(self, "_unresolved_revocations"):
+            self._unresolved_revocations.discard(token)
+            self._prune_revocation_journal({token})
 
         return token
 
     async def revoke_session(self, session_token: str) -> bool:
         """
-        Revoke an authenticated session across memory and SQLite persistent storage.
+        Revoke an authenticated session across memory, durable recovery journal, and SQLite persistence.
         Strict fail-closed invariant:
         - In-memory state is immediately invalidated.
-        - Session token is recorded in local revocation blacklist so it cannot authorize operations.
-        - Returns True ONLY when revocation is confirmed in persistent storage.
-        - If persistent revocation fails (db unavailable, db exception, or 0 rows updated),
-          returns False, and ensures the session remains barred from authorizing operations.
+        - Session token is durably recorded in on-disk revocation journal with fsync.
+        - If durable recording cannot be guaranteed, fails closed for affected session.
+        - Attempts to update SQLite persistence immediately.
+        - Returns True ONLY when persistent SQLite revocation is confirmed.
+        - If persistent SQLite revocation fails (database unavailable, database error, or 0 rows),
+          returns False, while ensuring the session remains durably barred from authorizing operations
+          across restarts via the journal until reconciliation completes.
         """
         if not session_token or not str(session_token).strip():
             return False
 
         from serein_core.auth import security_manager
 
-        # Invalidate in-memory session state immediately
-        security_manager.logout(session_token)
+        async with self._revocation_lock:
+            # 1. Invalidate in-memory session state immediately
+            security_manager.logout(session_token)
 
-        # Track in local revocation blacklist so it cannot authorize operations
-        if not hasattr(self, "_revoked_tokens"):
-            self._revoked_tokens = set()
-        self._revoked_tokens.add(session_token)
+            # 2. Add to in-memory unresolved set
+            self._unresolved_revocations.add(session_token)
 
-        db = await self._get_db()
-        if db is None or not hasattr(db, "revoke_auth_session"):
-            logger.error(f"Persistent revocation failed for '{session_token}': database unavailable")
-            return False
+            # 3. Durably persist to on-disk revocation journal (fsynced)
+            journal_persisted = self._write_revocation_journal(session_token)
+            if not journal_persisted:
+                logger.error(f"CRITICAL: Failed to durably record revocation journal for '{session_token}'")
 
-        try:
-            persisted = await self._safe_await(db.revoke_auth_session(session_token))
-            if not persisted:
-                logger.error(f"Persistent revocation failed for '{session_token}': storage returned False")
+            # 4. Attempt persistent SQLite update
+            db = await self._get_db()
+            if db is None or not hasattr(db, "revoke_auth_session"):
+                logger.error(f"Persistent SQLite revocation failed for '{session_token}': database unavailable")
                 return False
-            return True
-        except Exception as e:
-            logger.error(f"Persistent revocation exception for '{session_token}': {e}")
-            return False
+
+            try:
+                sqlite_persisted = await self._safe_await(db.revoke_auth_session(session_token))
+                if not sqlite_persisted:
+                    logger.error(f"Persistent SQLite revocation failed for '{session_token}': storage returned False")
+                    return False
+
+                # 5. Successfully confirmed in SQLite: prune from journal
+                self._unresolved_revocations.discard(session_token)
+                self._prune_revocation_journal({session_token})
+                return True
+            except Exception as e:
+                logger.error(f"Persistent SQLite revocation exception for '{session_token}': {e}")
+                return False
     
     def _register_handlers(self) -> None:
         """Register all default command handlers."""

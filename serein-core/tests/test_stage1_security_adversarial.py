@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import socket
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -1331,4 +1332,300 @@ async def test_revoked_session_remains_revoked_after_database_restart(tmp_path):
     exec_res = await bus2.execute("list_running_apps", session_id=token)
     assert exec_res.status is CommandStatus.DENIED
     
+    await db2.close()
+
+
+# =========================================================================
+# 23. Durable Revocation Journal, Restart Survival & Recovery Reconciliation
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_revocation_while_sqlite_unavailable_persists_to_durable_journal(tmp_path):
+    """
+    When SQLite is unavailable during revocation, the revocation must be durably
+    recorded in the on-disk recovery journal with fsync. In-memory session is purged
+    and operations fail closed.
+    """
+    from serein_core.auth import security_manager
+    db_file = tmp_path / "unavail_rev.db"
+    journal_file = tmp_path / "unavail_rev.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+        revocation_journal_path=journal_file,
+    )
+    user = f"unavail_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Simulate database becoming unavailable during revocation
+    with patch.object(bus, "_get_db", AsyncMock(return_value=None)):
+        revoked = await bus.revoke_session(token)
+        # Returns False because persistent SQLite could not be confirmed immediately
+        assert revoked is False
+
+    # Invariant 1: Durable journal file exists on disk and contains the revoked token
+    assert journal_file.exists()
+    journal_content = journal_file.read_text(encoding="utf-8")
+    assert token in journal_content
+
+    # Invariant 2: In-memory session is purged
+    assert token not in security_manager._sessions
+
+    # Invariant 3: Session cannot authorize operations
+    assert await bus._is_valid_session(token) is False
+    exec_res = await bus.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_process_restart_after_failed_revocation_remains_denied(tmp_path):
+    """
+    Critical restart vulnerability test:
+    If SQLite persistent revocation failed earlier (so SQLite still has revoked=0),
+    a process restart must read the durable on-disk journal and REJECT the session.
+    The session must NEVER become valid again after restart.
+    """
+    from serein_core.auth import security_manager
+    db_file = tmp_path / "restart_unresolved.db"
+    journal_file = tmp_path / "restart_unresolved.db.revocations"
+    db1 = Database(path=db_file)
+    await db1.connect()
+
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db1,
+        revocation_journal_path=journal_file,
+    )
+    user = f"fail_rev_{int(time.time())}"
+    token = await get_test_authenticated_session(bus1, username=user)
+    assert await bus1._is_valid_session(token) is True
+
+    # Simulate SQLite storage failure during revocation
+    with patch.object(db1, "revoke_auth_session", AsyncMock(side_effect=sqlite3.OperationalError("disk locked"))):
+        revoked = await bus1.revoke_session(token)
+        assert revoked is False
+
+    # Confirm SQLite still has revoked=0 (because SQLite write failed)
+    row = await db1.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert row is not None
+    assert row["revoked"] == 0
+
+    # Confirm token was durably recorded in journal
+    assert token in journal_file.read_text(encoding="utf-8")
+
+    # Terminate process 1 completely: discard bus1, close db1, purge in-memory state
+    await db1.close()
+    security_manager._sessions.clear()
+
+    # Start process 2: Fresh CommandBus instance connected to same DB and journal files
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db2,
+        revocation_journal_path=journal_file,
+    )
+
+    # Invariant: On restart, bus2 must recognize unresolved revocation from journal
+    # Even though SQLite row still has revoked=0, bus2 MUST reject the token!
+    assert await bus2._is_valid_session(token) is False
+
+    # Operations must be strictly DENIED
+    exec_res = await bus2.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+    assert "Missing or invalid authenticated session" in exec_res.error
+
+    conf_res = await bus2.confirm("any_challenge_id", approved=True, session_id=token)
+    assert conf_res.status is CommandStatus.DENIED
+
+    await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_database_recovery_after_failed_revocation_reconciles_successfully(tmp_path):
+    """
+    When the SQLite database recovers, reconcile_revocations() must sync all pending
+    journal revocations into SQLite (setting revoked=1) and prune the journal.
+    """
+    db_file = tmp_path / "recovery_reconcile.db"
+    journal_file = tmp_path / "recovery_reconcile.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+        revocation_journal_path=journal_file,
+    )
+    user = f"recov_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Simulate SQLite failure during revocation
+    with patch.object(db, "revoke_auth_session", AsyncMock(side_effect=sqlite3.OperationalError("disk locked"))):
+        assert await bus.revoke_session(token) is False
+
+    # SQLite still has revoked=0; journal has token
+    row = await db.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert row["revoked"] == 0
+    assert token in bus._read_revocation_journal()
+
+    # Now database recovers (mock removed, healthy DB connection)
+    reconciled = await bus.reconcile_revocations()
+    assert reconciled == 1
+
+    # Invariant 1: SQLite now permanently updated to revoked=1
+    row_updated = await db.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert row_updated["revoked"] == 1
+
+    # Invariant 2: Journal pruned
+    assert token not in bus._read_revocation_journal()
+    assert token not in bus._unresolved_revocations
+
+    # Invariant 3: Session remains permanently invalid
+    assert await bus._is_valid_session(token) is False
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_previously_revoked_token_reuse_strictly_blocked(tmp_path):
+    """
+    A previously revoked token must never be accepted for any command tier, confirmation,
+    or D-Bus IPC. Re-authenticating issues a new token while old token remains dead.
+    """
+    db_file = tmp_path / "reuse_blocked.db"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.REVERSIBLE, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+    )
+    user = f"reuse_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Revoke session
+    assert await bus.revoke_session(token) is True
+    assert await bus._is_valid_session(token) is False
+
+    # Attempt reuse across all operations
+    assert (await bus.execute("list_running_apps", session_id=token)).status is CommandStatus.DENIED
+    assert (await bus.execute("set_volume", params={"level": 50}, session_id=token)).status is CommandStatus.DENIED
+    assert (await bus.execute("shutdown", session_id=token)).status is CommandStatus.DENIED
+    assert (await bus.confirm("fake_challenge", approved=True, session_id=token)).status is CommandStatus.DENIED
+
+    # New login produces a new valid session token
+    new_token = await bus.authenticate(user, "ValidSecurePass123!")
+    assert new_token is not None
+    assert new_token != token
+    assert await bus._is_valid_session(new_token) is True
+    assert await bus._is_valid_session(token) is False
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_validation_and_revocation_race_safety(tmp_path):
+    """
+    Concurrent validation and revocation attempts must not deadlock, corrupt state,
+    or allow a revoked session to be validated after revocation completes.
+    """
+    db_file = tmp_path / "concurrent_race.db"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+    )
+    user = f"race_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+
+    async def validate_loop():
+        for _ in range(20):
+            await bus._is_valid_session(token)
+            await asyncio.sleep(0.001)
+
+    async def execute_loop():
+        for _ in range(10):
+            await bus.execute("list_running_apps", session_id=token)
+            await asyncio.sleep(0.002)
+
+    async def do_revoke():
+        await asyncio.sleep(0.005)
+        return await bus.revoke_session(token)
+
+    results = await asyncio.gather(
+        validate_loop(),
+        execute_loop(),
+        do_revoke(),
+        validate_loop(),
+        return_exceptions=False,
+    )
+
+    # Invariant: Final state is strictly revoked
+    assert await bus._is_valid_session(token) is False
+    exec_final = await bus.execute("list_running_apps", session_id=token)
+    assert exec_final.status is CommandStatus.DENIED
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_persistent_revocation_across_restart(tmp_path):
+    """
+    Successful persistent revocation permanently updates SQLite (revoked=1),
+    surviving database, process, and bus restart.
+    """
+    db_file = tmp_path / "persistent_rev_restart.db"
+    db1 = Database(path=db_file)
+    await db1.connect()
+
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db1,
+    )
+    user = f"persist_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus1, username=user)
+    assert await bus1._is_valid_session(token) is True
+
+    # Revoke session while DB is healthy
+    assert await bus1.revoke_session(token) is True
+    assert await bus1._is_valid_session(token) is False
+
+    # Terminate process 1
+    await db1.close()
+
+    # Restart process 2
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db2,
+    )
+
+    # Invariant: Permanently revoked in SQLite
+    assert await bus2._is_valid_session(token) is False
+    row = await db2.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert row["revoked"] == 1
+
+    exec_res = await bus2.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+
     await db2.close()
