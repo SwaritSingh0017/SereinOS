@@ -460,14 +460,23 @@ async def test_missing_or_invalid_authenticated_sessions():
     assert res_bad.status is CommandStatus.DENIED
     assert "Missing or invalid authenticated session" in res_bad.error
     
-    # 3. Valid authenticated session from SecurityManager
+    # 3. Unpersisted in-memory session without SQLite validation must be DENIED (no fail-open fallback)
     from serein_core.auth import security_manager
     test_user = f"user_{int(time.time())}"
     security_manager.register_user(test_user, "SecurePass123!", role="admin", age_confirmed=True)
-    sess = security_manager.authenticate(test_user, "SecurePass123!")
-    assert sess is not None
+    unpersisted_sess = security_manager.authenticate(test_user, "SecurePass123!")
+    assert unpersisted_sess is not None
     
-    res_valid = await bus.execute("list_running_apps", session_id=sess.session_token)
+    # Must be denied because it was never persisted to SQLite
+    res_unpersisted = await bus.execute("list_running_apps", session_id=unpersisted_sess.session_token)
+    assert res_unpersisted.status is CommandStatus.DENIED
+    assert "Missing or invalid authenticated session" in res_unpersisted.error
+    
+    # 4. Valid authenticated and SQLite-persisted session succeeds
+    persisted_token = await bus.authenticate(test_user, "SecurePass123!")
+    assert persisted_token is not None
+    
+    res_valid = await bus.execute("list_running_apps", session_id=persisted_token)
     assert res_valid.success is True
     assert "session" not in (res_valid.error or "").lower()
 
@@ -1049,3 +1058,277 @@ async def test_session_revocation_invalidates_memory_and_persisted_storage():
     assert denied.success is False
     assert denied.status is CommandStatus.DENIED
     assert "Invalid or expired authenticated session" in denied.error
+
+
+# =========================================================================
+# 22. Authentication Fail-Closed Invariants: Database Failures & Restarts
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_is_valid_session_fails_closed_when_database_unavailable():
+    """
+    _is_valid_session() must fail closed whenever the SQLite database is unavailable.
+    It must NEVER fall back to accepting an in-memory session.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    
+    # Create an in-memory session in SecurityManager
+    user = f"db_unavail_{int(time.time())}"
+    security_manager.register_user(user, "SecurePass123!", role="admin", age_confirmed=True)
+    in_memory_sess = security_manager.authenticate(user, "SecurePass123!")
+    assert in_memory_sess is not None
+    token = in_memory_sess.session_token
+
+    # Simulate database completely unavailable
+    with patch.object(bus, "_get_db", AsyncMock(return_value=None)):
+        # Invariant 1: _is_valid_session returns False (never falls back to in-memory session)
+        assert await bus._is_valid_session(token) is False
+        
+        # Invariant 2: Execution is strictly DENIED
+        exec_res = await bus.execute("list_running_apps", session_id=token)
+        assert exec_res.status is CommandStatus.DENIED
+        assert "Missing or invalid authenticated session" in exec_res.error
+
+        # Invariant 3: Confirmation is strictly rejected
+        conf_res = await bus.confirm("nonexistent_challenge", approved=True, session_id=token)
+        assert conf_res.success is False
+        assert conf_res.status is CommandStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_is_valid_session_fails_closed_on_database_exception():
+    """
+    _is_valid_session() must fail closed whenever an SQLite query raises an exception
+    (e.g. disk corruption, locked database). Never fall back to in-memory session.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    db = await bus._get_db()
+    
+    user = f"db_err_{int(time.time())}"
+    security_manager.register_user(user, "SecurePass123!", role="admin", age_confirmed=True)
+    in_memory_sess = security_manager.authenticate(user, "SecurePass123!")
+    assert in_memory_sess is not None
+    token = in_memory_sess.session_token
+
+    # Simulate SQLite query exception (e.g. locked database / disk I/O error)
+    with patch.object(db, "validate_auth_session", AsyncMock(side_effect=RuntimeError("SQLite disk I/O error"))):
+        # Invariant: _is_valid_session returns False on exception
+        assert await bus._is_valid_session(token) is False
+        
+        # Command execution fails closed
+        exec_res = await bus.execute("list_running_apps", session_id=token)
+        assert exec_res.status is CommandStatus.DENIED
+        assert "Missing or invalid authenticated session" in exec_res.error
+
+
+@pytest.mark.asyncio
+async def test_authenticate_fails_closed_when_database_unavailable():
+    """
+    authenticate() must return None and purge in-memory session if the database is unavailable.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY})
+    
+    user = f"auth_unavail_{int(time.time())}"
+    security_manager.register_user(user, "SecurePass123!", role="admin", age_confirmed=True)
+
+    with patch.object(bus, "_get_db", AsyncMock(return_value=None)):
+        token = await bus.authenticate(user, "SecurePass123!")
+        assert token is None, "authenticate must fail closed when DB is unavailable"
+
+    # In-memory session was not retained
+    assert not any(s.username == user for s in security_manager._sessions.values())
+
+
+@pytest.mark.asyncio
+async def test_authenticate_fails_closed_on_persistence_exception():
+    """
+    authenticate() must return None and purge in-memory session when DB raises an exception.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY})
+    db = await bus._get_db()
+    
+    user = f"auth_exc_{int(time.time())}"
+    security_manager.register_user(user, "SecurePass123!", role="admin", age_confirmed=True)
+
+    with patch.object(db, "create_auth_session", AsyncMock(side_effect=RuntimeError("DB locked"))):
+        token = await bus.authenticate(user, "SecurePass123!")
+        assert token is None, "authenticate must fail closed on persistence exception"
+
+    # In-memory session was purged
+    assert not any(s.username == user for s in security_manager._sessions.values())
+
+
+@pytest.mark.asyncio
+async def test_revoke_session_fails_closed_when_database_unavailable():
+    """
+    revoke_session() must return False if persistent storage is unavailable,
+    and must ensure the session cannot authorize operations.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    user = f"rev_unavail_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Database becomes unavailable
+    with patch.object(bus, "_get_db", AsyncMock(return_value=None)):
+        revoked = await bus.revoke_session(token)
+        # Invariant 1: Must return False because persistent revocation could not be confirmed
+        assert revoked is False
+        
+        # Invariant 2: Session cannot authorize operations
+        assert await bus._is_valid_session(token) is False
+        exec_res = await bus.execute("list_running_apps", session_id=token)
+        assert exec_res.status is CommandStatus.DENIED
+
+    # Invariant 3: Even after DB mock ends, the session cannot authorize operations on this bus
+    assert await bus._is_valid_session(token) is False
+    assert token not in security_manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_revoke_session_fails_closed_on_database_exception():
+    """
+    revoke_session() must return False on database exception,
+    and must ensure the session cannot authorize operations.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    db = await bus._get_db()
+    user = f"rev_exc_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # DB raises exception during revocation
+    with patch.object(db, "revoke_auth_session", AsyncMock(side_effect=RuntimeError("Storage failure"))):
+        revoked = await bus.revoke_session(token)
+        # Invariant 1: Must return False
+        assert revoked is False
+
+    # Invariant 2: In-memory session purged and cannot authorize operations
+    assert token not in security_manager._sessions
+    assert await bus._is_valid_session(token) is False
+    exec_res = await bus.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_session_validity_after_revocation():
+    """
+    After successful revocation, _is_valid_session returns False and all operations are DENIED.
+    """
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+    )
+    user = f"post_rev_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Revoke successfully
+    revoked = await bus.revoke_session(token)
+    assert revoked is True
+
+    # Session is permanently invalid
+    assert await bus._is_valid_session(token) is False
+    exec_res = await bus.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_session_validity_after_database_restart(tmp_path):
+    """
+    Active session revalidates successfully after database restart / reconnection.
+    """
+    db_file = tmp_path / "restart_active_session.db"
+    db1 = Database(path=db_file)
+    await db1.connect()
+    
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db1,
+    )
+    user = f"restart_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus1, username=user)
+    assert await bus1._is_valid_session(token) is True
+    
+    # Close database (simulating database outage / restart)
+    await db1.close()
+    
+    # While DB is down, authentication must fail closed
+    assert await bus1._is_valid_session(token) is False
+
+    # Restart database and connect fresh bus instance
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db2,
+    )
+    
+    # Active non-revoked session from SQLite must revalidate successfully
+    assert await bus2._is_valid_session(token) is True
+    exec_res = await bus2.execute("list_running_apps", session_id=token)
+    assert exec_res.success is True
+    
+    await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_revoked_session_remains_revoked_after_database_restart(tmp_path):
+    """
+    A revoked session must remain permanently revoked after database and process restart.
+    """
+    db_file = tmp_path / "restart_revoked_session.db"
+    db1 = Database(path=db_file)
+    await db1.connect()
+    
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db1,
+    )
+    user = f"rev_restart_{int(time.time())}"
+    token = await get_test_authenticated_session(bus1, username=user)
+    assert await bus1._is_valid_session(token) is True
+    
+    # Revoke the session
+    revoked = await bus1.revoke_session(token)
+    assert revoked is True
+    assert await bus1._is_valid_session(token) is False
+
+    # Simulate database and process restart
+    await db1.close()
+    
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db2,
+    )
+    
+    # Must remain revoked in new database connection / bus instance
+    assert await bus2._is_valid_session(token) is False
+    exec_res = await bus2.execute("list_running_apps", session_id=token)
+    assert exec_res.status is CommandStatus.DENIED
+    
+    await db2.close()

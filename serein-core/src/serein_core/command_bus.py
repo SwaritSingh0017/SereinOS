@@ -727,6 +727,7 @@ class CommandBus:
         self.safety_layer = safety_layer or SafetyLayer()
         self.db = database
         self.require_session = require_session
+        self._revoked_tokens: Set[str] = set()
         self._handlers: Dict[str, CommandHandler] = {}
         self._register_handlers()
 
@@ -749,51 +750,53 @@ class CommandBus:
     async def _is_valid_session(self, session_id: Optional[str]) -> bool:
         """
         Validate if session_id corresponds to an active, authenticated UI/daemon session.
-        Checks SQLite authenticated_sessions (revoked=0, not expired) and SecurityManager.
-        If revoked or expired in DB, purges any in-memory session and returns False.
-        Does NOT accept conversation_sessions rows or unauthenticated placeholder strings.
+        Strict fail-closed invariant:
+        - Rejects authentication whenever SQLite validation fails or database is unavailable.
+        - Never falls back to accepting an in-memory session.
+        - Checks SQLite authenticated_sessions (revoked=0, not expired) and synchronizes valid sessions.
+        - Rejects revoked tokens, expired tokens, or unpersisted placeholders.
         """
         if not session_id or not str(session_id).strip():
             return False
 
+        if session_id in getattr(self, "_revoked_tokens", set()):
+            return False
+
         from serein_core.auth import security_manager
 
-        # In-memory validation
-        sess = security_manager.validate_session(session_id)
-
         db = await self._get_db()
-        if db and hasattr(db, "validate_auth_session"):
-            try:
-                # Check if session was revoked in DB
-                revoked_check = await self._safe_await(db.fetch_one(
-                    "SELECT revoked FROM authenticated_sessions WHERE session_token = ?",
-                    (session_id,)
-                ))
-                if revoked_check and revoked_check["revoked"]:
-                    security_manager.logout(session_id)
-                    return False
+        if db is None or not hasattr(db, "validate_auth_session"):
+            logger.error("Session authentication rejected: SQLite database is unavailable")
+            return False
 
-                auth_row = await self._safe_await(db.validate_auth_session(session_id))
-                if auth_row:
-                    return True
-
-                # If authenticated in SecurityManager and not in DB, synchronize to DB
-                if sess:
-                    persisted = await self._safe_await(db.create_auth_session(
-                        session_token=session_id,
-                        username=sess.username,
-                        role=sess.role,
-                        expires_in_seconds=sess.expires_in_seconds,
-                    ))
-                    return bool(persisted)
-
+        try:
+            # Check SQLite persistent record
+            auth_row = await self._safe_await(db.validate_auth_session(session_id))
+            if not auth_row:
+                # Session not found, revoked (revoked=1), or expired in SQLite
+                security_manager.logout(session_id)
                 return False
-            except Exception as e:
-                logger.debug(f"DB auth_sessions lookup error: {e}")
-                return sess is not None
 
-        # Fallback when DB is not available
-        return sess is not None
+            # SQLite confirmed active session; verify and rehydrate in-memory if needed
+            sess = security_manager.validate_session(session_id)
+            if sess is None:
+                from serein_core.auth import UserSession
+                created_at = auth_row.get("created_at") or time.time()
+                expires_at = auth_row.get("expires_at") or (time.time() + 86400.0)
+                rehydrated = UserSession(
+                    session_token=auth_row["session_token"],
+                    username=auth_row["username"],
+                    role=auth_row.get("role", "user"),
+                    created_at=created_at,
+                    last_activity=auth_row.get("last_activity") or time.time(),
+                    expires_in_seconds=max(0.0, expires_at - created_at),
+                )
+                security_manager._sessions[session_id] = rehydrated
+
+            return True
+        except Exception as e:
+            logger.error(f"Session authentication rejected due to SQLite exception: {e}")
+            return False
 
     async def authenticate(
         self,
@@ -803,8 +806,8 @@ class CommandBus:
     ) -> Optional[str]:
         """
         Authenticate credentials against canonical SecurityManager and persist to SQLite.
-        Fails closed: if persistence fails, in-memory session is immediately invalidated.
-        Returns session token on success, None on failure.
+        Fails closed: if persistence fails or database is unavailable, in-memory session
+        is immediately invalidated and None is returned.
         """
         from serein_core.auth import security_manager
         session = security_manager.authenticate(username, password, expires_in_seconds=expires_in_seconds)
@@ -814,41 +817,69 @@ class CommandBus:
 
         token = session.session_token
         db = await self._get_db()
-        if db and hasattr(db, "create_auth_session"):
-            try:
-                persisted = await self._safe_await(db.create_auth_session(
-                    session_token=token,
-                    username=session.username,
-                    role=session.role,
-                    expires_in_seconds=expires_in_seconds,
-                ))
-                if not persisted:
-                    logger.error("Durable session persistence failed: failing closed")
-                    security_manager.logout(token)
-                    return None
-            except Exception as e:
-                logger.error(f"Durable session persistence exception: {e}; failing closed")
+        if db is None or not hasattr(db, "create_auth_session"):
+            logger.error("Durable session persistence failed: database unavailable; failing closed")
+            security_manager.logout(token)
+            return None
+
+        try:
+            persisted = await self._safe_await(db.create_auth_session(
+                session_token=token,
+                username=session.username,
+                role=session.role,
+                expires_in_seconds=expires_in_seconds,
+            ))
+            if not persisted:
+                logger.error("Durable session persistence failed: failing closed")
                 security_manager.logout(token)
                 return None
+        except Exception as e:
+            logger.error(f"Durable session persistence exception: {e}; failing closed")
+            security_manager.logout(token)
+            return None
+
+        if hasattr(self, "_revoked_tokens"):
+            self._revoked_tokens.discard(token)
 
         return token
 
     async def revoke_session(self, session_token: str) -> bool:
-        """Revoke an authenticated session across both memory and SQLite persistence."""
+        """
+        Revoke an authenticated session across memory and SQLite persistent storage.
+        Strict fail-closed invariant:
+        - In-memory state is immediately invalidated.
+        - Session token is recorded in local revocation blacklist so it cannot authorize operations.
+        - Returns True ONLY when revocation is confirmed in persistent storage.
+        - If persistent revocation fails (db unavailable, db exception, or 0 rows updated),
+          returns False, and ensures the session remains barred from authorizing operations.
+        """
         if not session_token or not str(session_token).strip():
             return False
 
         from serein_core.auth import security_manager
+
+        # Invalidate in-memory session state immediately
         security_manager.logout(session_token)
 
-        try:
-            db = await self._get_db()
-            if db and hasattr(db, "revoke_auth_session"):
-                await self._safe_await(db.revoke_auth_session(session_token))
-        except Exception as e:
-            logger.error(f"Failed to revoke session in DB: {e}")
+        # Track in local revocation blacklist so it cannot authorize operations
+        if not hasattr(self, "_revoked_tokens"):
+            self._revoked_tokens = set()
+        self._revoked_tokens.add(session_token)
 
-        return True
+        db = await self._get_db()
+        if db is None or not hasattr(db, "revoke_auth_session"):
+            logger.error(f"Persistent revocation failed for '{session_token}': database unavailable")
+            return False
+
+        try:
+            persisted = await self._safe_await(db.revoke_auth_session(session_token))
+            if not persisted:
+                logger.error(f"Persistent revocation failed for '{session_token}': storage returned False")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Persistent revocation exception for '{session_token}': {e}")
+            return False
     
     def _register_handlers(self) -> None:
         """Register all default command handlers."""
