@@ -40,6 +40,22 @@ from serein_core.config import CoreConfig, AIProviderConfig, mask_secret
 from serein_core.agent_sandbox import SandboxManager, SandboxType
 from serein_core.database import Database
 
+async def get_test_authenticated_session(
+    bus: CommandBus,
+    username: str = "adv_admin",
+    password: str = "ValidSecurePass123!",
+    role: str = "admin",
+    expires_in_seconds: float = 86400.0,
+) -> str:
+    """Helper for tests: registers credentials if needed and authenticates through canonical flow."""
+    from serein_core.auth import security_manager
+    if username not in security_manager._users:
+        security_manager.register_user(username, password, role=role, age_confirmed=True)
+    token = await bus.authenticate(username, password, expires_in_seconds=expires_in_seconds)
+    assert token is not None, f"Authentication must succeed for valid credentials ({username})"
+    return token
+
+
 
 # =========================================================================
 # 1. Path Traversal and Symlink Sandbox Tests
@@ -170,7 +186,7 @@ async def test_user_file_deletion_redirects_to_trash(tmp_path):
     user_file = tmp_path / "user_test_doc.txt"
     user_file.write_text("Preserve in trash", encoding="utf-8")
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     # Confirmation token request
     req = await bus.execute("delete_file", {"path": str(user_file)}, session_id=sess)
     assert req.status is CommandStatus.CONFIRMATION_REQUIRED
@@ -197,7 +213,7 @@ async def test_scratch_file_deletion_unlinks_directly():
     scratch_file = scratch_dir / f"scratch_{int(time.time() * 1000)}.tmp"
     scratch_file.write_text("Temporary scratch", encoding="utf-8")
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     req = await bus.execute("delete_file", {"path": str(scratch_file)}, session_id=sess)
     assert req.status is CommandStatus.CONFIRMATION_REQUIRED
     
@@ -216,7 +232,7 @@ async def test_challenge_parameter_tampering_rejected():
     """Submitting confirmation token with altered parameters must be rejected."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     # Request token for benign deletion
     req = await bus.execute("delete_file", {"path": "file1.txt"}, session_id=sess)
     token = req.challenge_id
@@ -233,7 +249,7 @@ async def test_challenge_command_substitution_rejected():
     """Submitting token generated for one command to a different command must be rejected."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
@@ -249,7 +265,7 @@ async def test_challenge_is_strictly_single_use():
     """A confirmation challenge cannot be replayed after being consumed or declined."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     
@@ -301,7 +317,7 @@ async def test_destructive_action_fails_closed_when_audit_fails():
     # Use real SQLite database for challenge lifecycle, but mock broken audit logger
     from serein_core.database import get_database
     db = await get_database()
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     with patch.object(db, "log_action", AsyncMock(side_effect=IOError("Database disk full / write error"))):
         req = await bus.execute("shutdown", session_id=sess)
         token = req.challenge_id
@@ -472,7 +488,7 @@ async def test_challenge_persistence_across_process_restart(tmp_path):
         database=db1,
     )
     
-    sess = await bus1.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus1)
     # Create challenge on bus 1
     req = await bus1.execute("shutdown", session_id=sess)
     token = req.challenge_id
@@ -511,7 +527,7 @@ async def test_concurrent_confirmation_race_protection(tmp_path):
         database=db,
     )
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
@@ -545,7 +561,7 @@ async def test_challenge_replay_after_consumption():
     """A consumed challenge cannot be replayed via confirm() or direct execute(token)."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     
@@ -663,7 +679,7 @@ async def test_safety_revalidation_after_confirmation():
         safety_layer=safety,
     )
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     # Request confirmation while permission is granted
     req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
@@ -699,7 +715,7 @@ async def test_package_installation_flag_and_command_injection_rejected():
         "package$(whoami)",
     ]
     
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     for bad_pkg in hostile_pkgs:
         req = await bus.execute("install_package", {"package": bad_pkg}, session_id=sess)
         if req.status is CommandStatus.CONFIRMATION_REQUIRED:
@@ -722,7 +738,7 @@ async def test_knowing_token_alone_cannot_approve_action_missing_session():
     CANNOT approve or execute the action without providing the authenticated session that created it.
     """
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
-    victim_session = await bus.create_authenticated_session(username="victim_admin")
+    victim_session = await get_test_authenticated_session(bus, username="victim_admin")
     
     # Legitimate user requests sensitive action
     req = await bus.execute("shutdown", session_id=victim_session)
@@ -763,7 +779,7 @@ async def test_knowing_token_alone_cannot_approve_action_missing_session():
 async def test_confirmation_rejected_for_forged_session_id():
     """Adversarial test: Attacker providing a fabricated / forged session ID is denied."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
-    legit_sess = await bus.create_authenticated_session(username="alice")
+    legit_sess = await get_test_authenticated_session(bus, username="alice")
     
     req = await bus.execute("shutdown", session_id=legit_sess)
     token = req.challenge_id
@@ -790,10 +806,7 @@ async def test_confirmation_rejected_for_expired_session():
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
     # Create an ephemeral session that expires in 0.05 seconds
-    short_lived_session = await bus.create_authenticated_session(
-        username="ephemeral_user",
-        expires_in_seconds=0.05
-    )
+    short_lived_session = await get_test_authenticated_session(bus, username="ephemeral_user", expires_in_seconds=0.05)
     
     req = await bus.execute("shutdown", session_id=short_lived_session)
     token = req.challenge_id
@@ -816,8 +829,8 @@ async def test_cross_session_confirmation_rejected():
     or execute a confirmation challenge generated by User A.
     """
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
-    sess_user_a = await bus.create_authenticated_session(username="user_a")
-    sess_user_b = await bus.create_authenticated_session(username="user_b")
+    sess_user_a = await get_test_authenticated_session(bus, username="user_a")
+    sess_user_b = await get_test_authenticated_session(bus, username="user_b")
     
     # User A initiates shutdown
     req = await bus.execute("shutdown", session_id=sess_user_a)
@@ -848,8 +861,8 @@ async def test_dbus_request_confirmation_session_enforcement():
     rejecting unauthenticated callers and mismatched sessions over IPC.
     """
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
-    sess_owner = await bus.create_authenticated_session(username="ipc_owner")
-    sess_attacker = await bus.create_authenticated_session(username="ipc_attacker")
+    sess_owner = await get_test_authenticated_session(bus, username="ipc_owner")
+    sess_attacker = await get_test_authenticated_session(bus, username="ipc_attacker")
     
     iface = bus._create_interface()
     
@@ -912,5 +925,127 @@ async def test_is_valid_session_rejects_conversation_sessions_and_placeholders()
     assert await bus._is_valid_session(None) is False
     
     # Valid authenticated session in SQLite or SecurityManager MUST be accepted
-    auth_sess = await bus.create_authenticated_session(username="real_user")
+    auth_sess = await get_test_authenticated_session(bus, username="real_user")
     assert await bus._is_valid_session(auth_sess) is True
+
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_session_minting_strictly_prohibited():
+    """
+    Adversarial test: Calling session-creation helpers without credentials
+    is strictly prohibited; neither CommandBus nor SecurityManager exposes
+    any unauthenticated session minting helper.
+    """
+    from serein_core.auth import SecurityManager, security_manager
+    bus = CommandBus()
+    
+    # Invariant: No create_authenticated_session on CommandBus
+    assert not hasattr(bus, "create_authenticated_session"), "CommandBus must not have unauthenticated session minting helper"
+    assert not hasattr(CommandBus, "create_authenticated_session"), "CommandBus class must not have unauthenticated session minting helper"
+    
+    # Invariant: No create_session on SecurityManager
+    assert not hasattr(security_manager, "create_session"), "SecurityManager must not have unauthenticated session minting helper"
+    assert not hasattr(SecurityManager, "create_session"), "SecurityManager class must not have unauthenticated session minting helper"
+
+
+@pytest.mark.asyncio
+async def test_authenticate_requires_valid_credentials():
+    """
+    Adversarial test: Authenticate requires genuine registered credentials.
+    Wrong passwords and non-existent users are rejected, and no session is created.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus()
+    
+    # Register test user
+    username = "auth_strict_user"
+    password = "CorrectPassword123!"
+    if username not in security_manager._users:
+        security_manager.register_user(username, password, role="admin", age_confirmed=True)
+    
+    # Attempt 1: Wrong password -> rejected
+    bad_token = await bus.authenticate(username, "WrongPassword999!")
+    assert bad_token is None, "Wrong password must return None"
+    
+    # Attempt 2: Nonexistent user -> rejected
+    nonexistent_token = await bus.authenticate("nobody_exists_here", "AnyPassword!")
+    assert nonexistent_token is None, "Nonexistent user must return None"
+    
+    # Invariant: Neither attempt created a session
+    assert not await bus._is_valid_session(bad_token)
+    assert not await bus._is_valid_session(nonexistent_token)
+    
+    # Correct credentials -> succeeds
+    valid_token = await bus.authenticate(username, password)
+    assert valid_token is not None
+    assert valid_token.startswith("sess_")
+    assert await bus._is_valid_session(valid_token) is True
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_fails_closed():
+    """
+    Adversarial test: If SQLite session persistence fails, authentication must fail closed.
+    The in-memory session must be immediately revoked and authenticate() must return None.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus()
+    db = await bus._get_db()
+    
+    username = "persist_fail_user"
+    password = "SecurePassword123!"
+    if username not in security_manager._users:
+        security_manager.register_user(username, password, role="admin", age_confirmed=True)
+    
+    # Mock DB create_auth_session to simulate disk write failure / SQLite error
+    with patch.object(db, "create_auth_session", AsyncMock(return_value=False)):
+        res_token = await bus.authenticate(username, password)
+        assert res_token is None, "Authentication must fail closed when DB persistence fails"
+    
+    # Invariant: No active in-memory session was left behind
+    for token, sess in list(security_manager._sessions.items()):
+        assert sess.username != username, "No orphan in-memory session must remain after persistence failure"
+
+
+@pytest.mark.asyncio
+async def test_session_revocation_invalidates_memory_and_persisted_storage():
+    """
+    Adversarial test: Revoking a session invalidates it across both in-memory SecurityManager
+    and SQLite authenticated_sessions table. Subsequent confirmation attempts must be DENIED.
+    """
+    from serein_core.auth import security_manager
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    db = await bus._get_db()
+    
+    username = "revoke_test_user"
+    password = "SecurePassword123!"
+    token = await get_test_authenticated_session(bus, username=username, password=password)
+    assert await bus._is_valid_session(token) is True
+    
+    # Request a sensitive action confirmation while session is valid
+    req = await bus.execute("shutdown", session_id=token)
+    assert req.status is CommandStatus.CONFIRMATION_REQUIRED
+    challenge_token = req.challenge_id
+    assert challenge_token is not None
+    
+    # Now revoke the session
+    revoked = await bus.revoke_session(token)
+    assert revoked is True
+    
+    # Invariant 1: In-memory session purged
+    assert token not in security_manager._sessions
+    
+    # Invariant 2: Database row marked revoked
+    db_row = await db.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert db_row is not None
+    assert db_row["revoked"] == 1
+    
+    # Invariant 3: _is_valid_session returns False
+    assert await bus._is_valid_session(token) is False
+    
+    # Invariant 4: Attempting to confirm with revoked session must be DENIED
+    denied = await bus.confirm(challenge_token, approved=True, session_id=token)
+    assert denied.success is False
+    assert denied.status is CommandStatus.DENIED
+    assert "Invalid or expired authenticated session" in denied.error

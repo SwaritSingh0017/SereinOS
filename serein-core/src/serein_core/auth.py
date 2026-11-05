@@ -192,8 +192,16 @@ class SecurityManager:
         logger.info(f"User '{username}' registered with role '{role}' and verified age confirmation.")
         return True
 
-    def authenticate(self, username: str, password: str) -> Optional[UserSession]:
-        """Authenticate user credentials and create a secure session."""
+    def authenticate(
+        self,
+        username: str,
+        password: str,
+        expires_in_seconds: float = 86400.0,
+    ) -> Optional[UserSession]:
+        """
+        Authenticate user credentials and create a secure session.
+        Only valid credentials can mint an authenticated session.
+        """
         username = sanitize_input(username, max_length=64, allow_html=False)
         user_data = self._users.get(username)
         if not user_data:
@@ -208,25 +216,7 @@ class SecurityManager:
             session_token=token,
             username=username,
             role=user_data["role"],
-            age_confirmed=user_data["age_confirmed"]
-        )
-        self._sessions[token] = session
-        return session
-
-    def create_session(
-        self,
-        username: str = "admin",
-        role: str = "admin",
-        age_confirmed: bool = True,
-        expires_in_seconds: float = 86400.0,
-    ) -> UserSession:
-        """Create and register an authenticated user session directly."""
-        token = f"sess_{secrets.token_urlsafe(32)}"
-        session = UserSession(
-            session_token=token,
-            username=username,
-            role=role,
-            age_confirmed=age_confirmed,
+            age_confirmed=user_data["age_confirmed"],
             expires_in_seconds=expires_in_seconds,
         )
         self._sessions[token] = session
@@ -248,9 +238,13 @@ class SecurityManager:
         session.touch()
         return session
 
-    def logout(self, token: str):
-        """Invalidate session."""
-        self._sessions.pop(token, None)
+    def logout(self, token: str) -> bool:
+        """Invalidate and revoke in-memory session."""
+        return self._sessions.pop(token, None) is not None
+
+    def revoke_session(self, token: str) -> bool:
+        """Alias for logout."""
+        return self.logout(token)
 
 
 # Default shared security manager instance

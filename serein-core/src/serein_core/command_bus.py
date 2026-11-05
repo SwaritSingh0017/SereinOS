@@ -749,60 +749,106 @@ class CommandBus:
     async def _is_valid_session(self, session_id: Optional[str]) -> bool:
         """
         Validate if session_id corresponds to an active, authenticated UI/daemon session.
-        Checks in-memory SecurityManager and SQLite authenticated_sessions table.
+        Checks SQLite authenticated_sessions (revoked=0, not expired) and SecurityManager.
+        If revoked or expired in DB, purges any in-memory session and returns False.
         Does NOT accept conversation_sessions rows or unauthenticated placeholder strings.
         """
         if not session_id or not str(session_id).strip():
             return False
 
-        # 1. In-memory SecurityManager active sessions
-        try:
-            from serein_core.auth import security_manager
-            sess = security_manager.validate_session(session_id)
-            if sess:
-                return True
-        except Exception:
-            pass
-
-        # 2. SQLite authenticated_sessions table
-        try:
-            db = await self._get_db()
-            if db and hasattr(db, "validate_auth_session"):
-                auth_sess = await self._safe_await(db.validate_auth_session(session_id))
-                if auth_sess:
-                    return True
-        except Exception:
-            pass
-
-        return False
-
-    async def create_authenticated_session(
-        self,
-        username: str = "admin",
-        role: str = "admin",
-        expires_in_seconds: float = 86400.0,
-    ) -> str:
-        """Create a verified session in both SecurityManager and SQLite."""
         from serein_core.auth import security_manager
-        sess = security_manager.create_session(
-            username=username,
-            role=role,
-            age_confirmed=True,
-            expires_in_seconds=expires_in_seconds,
-        )
-        token = sess.session_token
-        try:
-            db = await self._get_db()
-            if db and hasattr(db, "create_auth_session"):
-                await self._safe_await(db.create_auth_session(
+
+        # In-memory validation
+        sess = security_manager.validate_session(session_id)
+
+        db = await self._get_db()
+        if db and hasattr(db, "validate_auth_session"):
+            try:
+                # Check if session was revoked in DB
+                revoked_check = await self._safe_await(db.fetch_one(
+                    "SELECT revoked FROM authenticated_sessions WHERE session_token = ?",
+                    (session_id,)
+                ))
+                if revoked_check and revoked_check["revoked"]:
+                    security_manager.logout(session_id)
+                    return False
+
+                auth_row = await self._safe_await(db.validate_auth_session(session_id))
+                if auth_row:
+                    return True
+
+                # If authenticated in SecurityManager and not in DB, synchronize to DB
+                if sess:
+                    persisted = await self._safe_await(db.create_auth_session(
+                        session_token=session_id,
+                        username=sess.username,
+                        role=sess.role,
+                        expires_in_seconds=sess.expires_in_seconds,
+                    ))
+                    return bool(persisted)
+
+                return False
+            except Exception as e:
+                logger.debug(f"DB auth_sessions lookup error: {e}")
+                return sess is not None
+
+        # Fallback when DB is not available
+        return sess is not None
+
+    async def authenticate(
+        self,
+        username: str,
+        password: str,
+        expires_in_seconds: float = 86400.0,
+    ) -> Optional[str]:
+        """
+        Authenticate credentials against canonical SecurityManager and persist to SQLite.
+        Fails closed: if persistence fails, in-memory session is immediately invalidated.
+        Returns session token on success, None on failure.
+        """
+        from serein_core.auth import security_manager
+        session = security_manager.authenticate(username, password, expires_in_seconds=expires_in_seconds)
+        if not session:
+            logger.warning(f"Authentication failed for user '{username}': invalid credentials")
+            return None
+
+        token = session.session_token
+        db = await self._get_db()
+        if db and hasattr(db, "create_auth_session"):
+            try:
+                persisted = await self._safe_await(db.create_auth_session(
                     session_token=token,
-                    username=username,
-                    role=role,
+                    username=session.username,
+                    role=session.role,
                     expires_in_seconds=expires_in_seconds,
                 ))
-        except Exception as e:
-            logger.debug(f"Failed to persist auth session to DB: {e}")
+                if not persisted:
+                    logger.error("Durable session persistence failed: failing closed")
+                    security_manager.logout(token)
+                    return None
+            except Exception as e:
+                logger.error(f"Durable session persistence exception: {e}; failing closed")
+                security_manager.logout(token)
+                return None
+
         return token
+
+    async def revoke_session(self, session_token: str) -> bool:
+        """Revoke an authenticated session across both memory and SQLite persistence."""
+        if not session_token or not str(session_token).strip():
+            return False
+
+        from serein_core.auth import security_manager
+        security_manager.logout(session_token)
+
+        try:
+            db = await self._get_db()
+            if db and hasattr(db, "revoke_auth_session"):
+                await self._safe_await(db.revoke_auth_session(session_token))
+        except Exception as e:
+            logger.error(f"Failed to revoke session in DB: {e}")
+
+        return True
     
     def _register_handlers(self) -> None:
         """Register all default command handlers."""

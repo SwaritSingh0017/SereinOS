@@ -9,6 +9,15 @@ from serein_core.command_bus import (
     PermissionTier,
 )
 
+async def get_test_authenticated_session(bus: CommandBus, username: str = 'bus_admin', password: str = 'ValidSecurePass123!') -> str:
+    from serein_core.auth import security_manager
+    if username not in security_manager._users:
+        security_manager.register_user(username, password, role='admin', age_confirmed=True)
+    token = await bus.authenticate(username, password)
+    assert token is not None, 'Authentication must succeed for valid registered credentials'
+    return token
+
+
 
 @pytest.mark.asyncio
 async def test_read_only_command_is_available():
@@ -51,7 +60,7 @@ async def test_destructive_command_requests_confirmation():
             PermissionTier.DESTRUCTIVE,
         }
     )
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     result = await bus.execute("delete_file", {"path": "example.txt"}, session_id=sess)
     assert result.status is CommandStatus.CONFIRMATION_REQUIRED
     assert result.confirmation_token
@@ -62,7 +71,7 @@ async def test_confirmation_can_be_declined():
     bus = CommandBus(
         allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE}
     )
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     requested = await bus.execute("shutdown", session_id=sess)
     assert requested.confirmation_token
 
@@ -75,7 +84,7 @@ async def test_confirmation_token_is_single_use():
     bus = CommandBus(
         allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE}
     )
-    sess = await bus.create_authenticated_session()
+    sess = await get_test_authenticated_session(bus)
     requested = await bus.execute("shutdown", session_id=sess)
     token = requested.confirmation_token
 
