@@ -6,6 +6,7 @@ import asyncio
 import sqlite3
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -223,6 +224,17 @@ CREATE TABLE IF NOT EXISTS confirmation_challenges (
     consumed_at REAL
 );
 
+-- Authenticated Sessions (verified UI and daemon login sessions)
+CREATE TABLE IF NOT EXISTS authenticated_sessions (
+    session_token TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    role TEXT DEFAULT 'user',
+    created_at REAL NOT NULL,
+    last_activity REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    revoked INTEGER DEFAULT 0
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
@@ -234,6 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON system_events(timestamp DESC)
 CREATE INDEX IF NOT EXISTS idx_messages_session ON conversation_messages(session_id, timestamp ASC);
 CREATE INDEX IF NOT EXISTS idx_challenges_lookup ON confirmation_challenges(challenge_id, session_id);
 CREATE INDEX IF NOT EXISTS idx_challenges_status ON confirmation_challenges(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON authenticated_sessions(session_token, revoked, expires_at);
 """
 
 
@@ -678,6 +691,65 @@ class Database:
             return cursor.rowcount == 1
         except Exception as e:
             logger.error(f"Failed to cancel challenge in DB: {e}")
+            return False
+
+    # Authenticated Sessions Persistence
+    async def create_auth_session(
+        self,
+        session_token: str,
+        username: str = "admin",
+        role: str = "admin",
+        expires_in_seconds: float = 86400.0,
+    ) -> bool:
+        """Store an authenticated session in SQLite."""
+        try:
+            now = time.time()
+            expires_at = now + expires_in_seconds
+            await self.execute("""
+                INSERT INTO authenticated_sessions
+                (session_token, username, role, created_at, last_activity, expires_at, revoked)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(session_token) DO UPDATE SET
+                    last_activity = excluded.last_activity,
+                    expires_at = excluded.expires_at,
+                    revoked = 0
+            """, (session_token, username, role, now, now, expires_at))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create auth session in DB: {e}")
+            return False
+
+    async def validate_auth_session(self, session_token: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate an authenticated session from SQLite.
+        Checks for active, non-revoked, non-expired status and updates last_activity.
+        """
+        try:
+            now = time.time()
+            row = await self.fetch_one("""
+                SELECT session_token, username, role, created_at, last_activity, expires_at, revoked
+                FROM authenticated_sessions
+                WHERE session_token = ? AND revoked = 0 AND expires_at > ?
+            """, (session_token, now))
+            if row:
+                await self.execute("""
+                    UPDATE authenticated_sessions SET last_activity = ? WHERE session_token = ?
+                """, (now, session_token))
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to validate auth session in DB: {e}")
+            return None
+
+    async def revoke_auth_session(self, session_token: str) -> bool:
+        """Revoke an authenticated session."""
+        try:
+            cursor = await self.execute("""
+                UPDATE authenticated_sessions SET revoked = 1 WHERE session_token = ?
+            """, (session_token,))
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to revoke auth session in DB: {e}")
             return False
 
     async def save_message(self, message: Dict[str, Any]) -> str:

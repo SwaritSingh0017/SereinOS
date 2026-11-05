@@ -203,12 +203,31 @@ class SecurityManager:
             return None
         
         # Generate cryptographically secure random session token
-        token = secrets.token_urlsafe(32)
+        token = f"sess_{secrets.token_urlsafe(32)}"
         session = UserSession(
             session_token=token,
             username=username,
             role=user_data["role"],
             age_confirmed=user_data["age_confirmed"]
+        )
+        self._sessions[token] = session
+        return session
+
+    def create_session(
+        self,
+        username: str = "admin",
+        role: str = "admin",
+        age_confirmed: bool = True,
+        expires_in_seconds: float = 86400.0,
+    ) -> UserSession:
+        """Create and register an authenticated user session directly."""
+        token = f"sess_{secrets.token_urlsafe(32)}"
+        session = UserSession(
+            session_token=token,
+            username=username,
+            role=role,
+            age_confirmed=age_confirmed,
+            expires_in_seconds=expires_in_seconds,
         )
         self._sessions[token] = session
         return session

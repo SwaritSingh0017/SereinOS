@@ -15,6 +15,7 @@ Validates live defense mechanisms against:
 - SSRF loopback and private CIDR blocking
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -169,14 +170,15 @@ async def test_user_file_deletion_redirects_to_trash(tmp_path):
     user_file = tmp_path / "user_test_doc.txt"
     user_file.write_text("Preserve in trash", encoding="utf-8")
     
+    sess = await bus.create_authenticated_session()
     # Confirmation token request
-    req = await bus.execute("delete_file", {"path": str(user_file)})
+    req = await bus.execute("delete_file", {"path": str(user_file)}, session_id=sess)
     assert req.status is CommandStatus.CONFIRMATION_REQUIRED
     assert req.challenge_id is not None
     
     # Confirm deletion
     with patch("send2trash.send2trash") as mock_trash:
-        conf = await bus.confirm(req.challenge_id, approved=True)
+        conf = await bus.confirm(req.challenge_id, approved=True, session_id=sess)
         assert conf.success is True
         assert "trashed" in conf.result
         # send2trash was called to protect user file
@@ -195,10 +197,11 @@ async def test_scratch_file_deletion_unlinks_directly():
     scratch_file = scratch_dir / f"scratch_{int(time.time() * 1000)}.tmp"
     scratch_file.write_text("Temporary scratch", encoding="utf-8")
     
-    req = await bus.execute("delete_file", {"path": str(scratch_file)})
+    sess = await bus.create_authenticated_session()
+    req = await bus.execute("delete_file", {"path": str(scratch_file)}, session_id=sess)
     assert req.status is CommandStatus.CONFIRMATION_REQUIRED
     
-    conf = await bus.confirm(req.challenge_id, approved=True)
+    conf = await bus.confirm(req.challenge_id, approved=True, session_id=sess)
     assert conf.success is True
     assert "deleted" in conf.result
     assert not scratch_file.exists()
@@ -213,13 +216,14 @@ async def test_challenge_parameter_tampering_rejected():
     """Submitting confirmation token with altered parameters must be rejected."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
+    sess = await bus.create_authenticated_session()
     # Request token for benign deletion
-    req = await bus.execute("delete_file", {"path": "file1.txt"})
+    req = await bus.execute("delete_file", {"path": "file1.txt"}, session_id=sess)
     token = req.challenge_id
     assert token is not None
     
     # Attacker tries to execute delete_file with token but substituted path
-    tampered = await bus.execute("delete_file", {"path": "file2_substituted.txt"}, confirmation_token=token)
+    tampered = await bus.execute("delete_file", {"path": "file2_substituted.txt"}, confirmation_token=token, session_id=sess)
     assert tampered.status is CommandStatus.DENIED
     assert "parameters altered" in tampered.error.lower()
 
@@ -229,12 +233,13 @@ async def test_challenge_command_substitution_rejected():
     """Submitting token generated for one command to a different command must be rejected."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    req = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
     
     # Attempt to use shutdown token to reboot or delete
-    mismatch = await bus.execute("reboot", confirmation_token=token)
+    mismatch = await bus.execute("reboot", confirmation_token=token, session_id=sess)
     assert mismatch.status is CommandStatus.DENIED
     assert "command mismatch" in mismatch.error.lower()
 
@@ -244,15 +249,16 @@ async def test_challenge_is_strictly_single_use():
     """A confirmation challenge cannot be replayed after being consumed or declined."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    req = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     
     # Decline once
-    dec = await bus.confirm(token, approved=False)
+    dec = await bus.confirm(token, approved=False, session_id=sess)
     assert dec.status is CommandStatus.DENIED
     
     # Second attempt must fail
-    replay = await bus.confirm(token, approved=True)
+    replay = await bus.confirm(token, approved=True, session_id=sess)
     assert replay.status is CommandStatus.FAILED
 
 
@@ -295,12 +301,13 @@ async def test_destructive_action_fails_closed_when_audit_fails():
     # Use real SQLite database for challenge lifecycle, but mock broken audit logger
     from serein_core.database import get_database
     db = await get_database()
+    sess = await bus.create_authenticated_session()
     with patch.object(db, "log_action", AsyncMock(side_effect=IOError("Database disk full / write error"))):
-        req = await bus.execute("shutdown")
+        req = await bus.execute("shutdown", session_id=sess)
         token = req.challenge_id
         
         # Confirmation attempt must abort because audit write fails
-        result = await bus.confirm(token, approved=True)
+        result = await bus.confirm(token, approved=True, session_id=sess)
         assert result.status is CommandStatus.FAILED
         assert "Security audit failure" in result.error
 
@@ -465,8 +472,9 @@ async def test_challenge_persistence_across_process_restart(tmp_path):
         database=db1,
     )
     
+    sess = await bus1.create_authenticated_session()
     # Create challenge on bus 1
-    req = await bus1.execute("shutdown")
+    req = await bus1.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
     
@@ -478,8 +486,8 @@ async def test_challenge_persistence_across_process_restart(tmp_path):
         database=db2,
     )
     
-    # Confirm on Bus 2 using challenge generated on Bus 1
-    conf = await bus2.confirm(token, approved=True)
+    # Confirm on Bus 2 using challenge generated on Bus 1 and verified DB auth session
+    conf = await bus2.confirm(token, approved=True, session_id=sess)
     assert conf.success is True
     assert conf.result.get("action") == "shutdown"
     
@@ -503,17 +511,18 @@ async def test_concurrent_confirmation_race_protection(tmp_path):
         database=db,
     )
     
-    req = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
     
     # Launch 5 concurrent coroutines racing to confirm the exact same challenge token
     results = await asyncio.gather(
-        bus.confirm(token, approved=True),
-        bus.confirm(token, approved=True),
-        bus.confirm(token, approved=True),
-        bus.confirm(token, approved=True),
-        bus.confirm(token, approved=True),
+        bus.confirm(token, approved=True, session_id=sess),
+        bus.confirm(token, approved=True, session_id=sess),
+        bus.confirm(token, approved=True, session_id=sess),
+        bus.confirm(token, approved=True, session_id=sess),
+        bus.confirm(token, approved=True, session_id=sess),
         return_exceptions=True
     )
     
@@ -536,21 +545,22 @@ async def test_challenge_replay_after_consumption():
     """A consumed challenge cannot be replayed via confirm() or direct execute(token)."""
     bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
     
-    req = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     
     # First confirmation succeeds
-    conf1 = await bus.confirm(token, approved=True)
+    conf1 = await bus.confirm(token, approved=True, session_id=sess)
     assert conf1.success is True
     
     # Replay attempt via confirm()
-    conf2 = await bus.confirm(token, approved=True)
+    conf2 = await bus.confirm(token, approved=True, session_id=sess)
     assert conf2.success is False
     assert conf2.status is CommandStatus.FAILED
     assert "already been consumed" in conf2.error
     
     # Replay attempt via direct execute()
-    conf3 = await bus.execute("shutdown", confirmation_token=token)
+    conf3 = await bus.execute("shutdown", confirmation_token=token, session_id=sess)
     assert conf3.success is False
     assert conf3.status is CommandStatus.DENIED
     assert "already" in conf3.error.lower() and "consumed" in conf3.error.lower()
@@ -653,8 +663,9 @@ async def test_safety_revalidation_after_confirmation():
         safety_layer=safety,
     )
     
+    sess = await bus.create_authenticated_session()
     # Request confirmation while permission is granted
-    req = await bus.execute("shutdown")
+    req = await bus.execute("shutdown", session_id=sess)
     token = req.challenge_id
     assert token is not None
     
@@ -662,7 +673,7 @@ async def test_safety_revalidation_after_confirmation():
     safety._permissions["automation"] = PermissionLevel.NONE
     
     # Confirm attempt must fail at safety revalidation
-    conf = await bus.confirm(token, approved=True)
+    conf = await bus.confirm(token, approved=True, session_id=sess)
     assert conf.success is False
     assert conf.status is CommandStatus.DENIED
     assert "Automation access not granted" in conf.error
@@ -688,9 +699,218 @@ async def test_package_installation_flag_and_command_injection_rejected():
         "package$(whoami)",
     ]
     
+    sess = await bus.create_authenticated_session()
     for bad_pkg in hostile_pkgs:
-        req = await bus.execute("install_package", {"package": bad_pkg})
-        token = req.challenge_id
-        res = await bus.confirm(token, approved=True)
+        req = await bus.execute("install_package", {"package": bad_pkg}, session_id=sess)
+        if req.status is CommandStatus.CONFIRMATION_REQUIRED:
+            token = req.challenge_id
+            res = await bus.confirm(token, approved=True, session_id=sess)
+        else:
+            res = req
         assert res.success is False
         assert "Invalid package name" in res.error or "denied" in str(res.status).lower()
+
+
+# =========================================================================
+# 21. Adversarial Confirmation Authentication & Session Binding Tests
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_knowing_token_alone_cannot_approve_action_missing_session():
+    """
+    Adversarial test: An attacker who intercepts or guesses the confirmation challenge token
+    CANNOT approve or execute the action without providing the authenticated session that created it.
+    """
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    victim_session = await bus.create_authenticated_session(username="victim_admin")
+    
+    # Legitimate user requests sensitive action
+    req = await bus.execute("shutdown", session_id=victim_session)
+    assert req.status is CommandStatus.CONFIRMATION_REQUIRED
+    token = req.challenge_id
+    assert token is not None
+    
+    # Attack 1: Attacker attempts confirm() with token but NO session_id (missing session)
+    attack1 = await bus.confirm(token, approved=True, session_id=None)
+    assert attack1.success is False
+    assert attack1.status is CommandStatus.DENIED
+    assert "Missing authenticated session" in attack1.error
+
+    # Attack 2: Attacker attempts confirm() with token and empty string session_id
+    attack2 = await bus.confirm(token, approved=True, session_id="")
+    assert attack2.success is False
+    assert attack2.status is CommandStatus.DENIED
+    assert "Missing authenticated session" in attack2.error
+
+    # Attack 3: Attacker attempts direct execute() with token and missing session
+    attack3 = await bus.execute("shutdown", confirmation_token=token, session_id=None)
+    assert attack3.success is False
+    assert attack3.status is CommandStatus.DENIED
+    assert "Missing authenticated session" in attack3.error
+
+    # Invariant: The challenge must NOT have been consumed by the unauthorized attempts
+    db = await bus._get_db()
+    chal_row = await db.get_challenge(token)
+    assert chal_row["status"] == "pending"
+
+    # Legitimate user supplies verified bound session -> succeeds
+    legit = await bus.confirm(token, approved=True, session_id=victim_session)
+    assert legit.success is True
+    assert legit.result.get("action") == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_rejected_for_forged_session_id():
+    """Adversarial test: Attacker providing a fabricated / forged session ID is denied."""
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    legit_sess = await bus.create_authenticated_session(username="alice")
+    
+    req = await bus.execute("shutdown", session_id=legit_sess)
+    token = req.challenge_id
+    
+    # Attacker crafts fake session ID
+    fake_session = "sess_attacker_forged_token_007"
+    
+    # Attempt via confirm()
+    attack_confirm = await bus.confirm(token, approved=True, session_id=fake_session)
+    assert attack_confirm.success is False
+    assert attack_confirm.status is CommandStatus.DENIED
+    assert "Invalid or expired authenticated session" in attack_confirm.error
+    
+    # Attempt via direct execute()
+    attack_exec = await bus.execute("shutdown", confirmation_token=token, session_id=fake_session)
+    assert attack_exec.success is False
+    assert attack_exec.status is CommandStatus.DENIED
+    assert "Invalid or expired authenticated session" in attack_exec.error
+
+
+@pytest.mark.asyncio
+async def test_confirmation_rejected_for_expired_session():
+    """Adversarial test: Confirming with an authenticated session whose TTL has expired is denied."""
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    
+    # Create an ephemeral session that expires in 0.05 seconds
+    short_lived_session = await bus.create_authenticated_session(
+        username="ephemeral_user",
+        expires_in_seconds=0.05
+    )
+    
+    req = await bus.execute("shutdown", session_id=short_lived_session)
+    token = req.challenge_id
+    assert req.status is CommandStatus.CONFIRMATION_REQUIRED
+    
+    # Sleep to allow session TTL to expire
+    await asyncio.sleep(0.08)
+    
+    # Attempt confirmation with expired session
+    expired_confirm = await bus.confirm(token, approved=True, session_id=short_lived_session)
+    assert expired_confirm.success is False
+    assert expired_confirm.status is CommandStatus.DENIED
+    assert "Invalid or expired authenticated session" in expired_confirm.error
+
+
+@pytest.mark.asyncio
+async def test_cross_session_confirmation_rejected():
+    """
+    Adversarial test: User B (who has a valid authenticated session) cannot approve
+    or execute a confirmation challenge generated by User A.
+    """
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    sess_user_a = await bus.create_authenticated_session(username="user_a")
+    sess_user_b = await bus.create_authenticated_session(username="user_b")
+    
+    # User A initiates shutdown
+    req = await bus.execute("shutdown", session_id=sess_user_a)
+    token = req.challenge_id
+    
+    # User B (authenticated, but wrong user session) attempts to confirm User A's challenge
+    cross_confirm = await bus.confirm(token, approved=True, session_id=sess_user_b)
+    assert cross_confirm.success is False
+    assert cross_confirm.status is CommandStatus.DENIED
+    assert "Session mismatch for confirmation challenge" in cross_confirm.error
+    
+    # User B attempts direct execute() with User A's token
+    cross_exec = await bus.execute("shutdown", confirmation_token=token, session_id=sess_user_b)
+    assert cross_exec.success is False
+    assert cross_exec.status is CommandStatus.DENIED
+    assert "Session mismatch for confirmation challenge" in cross_exec.error
+    
+    # User A confirms their own challenge -> succeeds
+    legit_confirm = await bus.confirm(token, approved=True, session_id=sess_user_a)
+    assert legit_confirm.success is True
+    assert legit_confirm.result.get("action") == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_dbus_request_confirmation_session_enforcement():
+    """
+    D-Bus RequestConfirmation and ExecuteCommand must enforce session verification,
+    rejecting unauthenticated callers and mismatched sessions over IPC.
+    """
+    bus = CommandBus(allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE})
+    sess_owner = await bus.create_authenticated_session(username="ipc_owner")
+    sess_attacker = await bus.create_authenticated_session(username="ipc_attacker")
+    
+    iface = bus._create_interface()
+    
+    # 1. Execute sensitive command over D-Bus with owner session -> requires confirmation
+    res_raw = await iface.ExecuteCommand.__wrapped__(iface, "shutdown", "{}", "", sess_owner)
+    res_data = json.loads(res_raw)
+    assert res_data["requires_confirmation"] is True
+    token = res_data["confirmation_token"]
+    assert token is not None
+    
+    # 2. D-Bus confirmation with missing session -> rejected
+    unauth_raw = await iface.RequestConfirmation.__wrapped__(iface, token, True, "")
+    unauth_data = json.loads(unauth_raw)
+    assert unauth_data["success"] is False
+    assert unauth_data["status"] == "denied"
+    assert "Missing authenticated session" in unauth_data["error"]
+    
+    # 3. D-Bus confirmation with forged session -> rejected
+    forged_raw = await iface.RequestConfirmation.__wrapped__(iface, token, True, "sess_fake_9999")
+    forged_data = json.loads(forged_raw)
+    assert forged_data["success"] is False
+    assert forged_data["status"] == "denied"
+    assert "Invalid or expired authenticated session" in forged_data["error"]
+    
+    # 4. D-Bus confirmation with mismatched session (attacker) -> rejected
+    cross_raw = await iface.RequestConfirmation.__wrapped__(iface, token, True, sess_attacker)
+    cross_data = json.loads(cross_raw)
+    assert cross_data["success"] is False
+    assert cross_data["status"] == "denied"
+    assert "Session mismatch" in cross_data["error"]
+    
+    # 5. D-Bus confirmation with legitimate owner session -> approved!
+    legit_raw = await iface.RequestConfirmation.__wrapped__(iface, token, True, sess_owner)
+    legit_data = json.loads(legit_raw)
+    assert legit_data["success"] is True
+    assert legit_data["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_is_valid_session_rejects_conversation_sessions_and_placeholders():
+    """
+    _is_valid_session() must ONLY validate authenticated user/daemon sessions.
+    It must reject conversation_sessions database rows, and unauthenticated placeholders.
+    """
+    bus = CommandBus()
+    db = await bus._get_db()
+    
+    # Insert a conversation session (dialogue history turn)
+    conv_id = "conv_chat_history_9999"
+    await db.create_session(session_id=conv_id, summary="Chat turn")
+    
+    # A conversation_sessions row MUST NOT be accepted as an authenticated session!
+    assert await bus._is_valid_session(conv_id) is False
+    
+    # Placeholders must NOT be accepted!
+    assert await bus._is_valid_session("default_session") is False
+    assert await bus._is_valid_session("system_local") is False
+    assert await bus._is_valid_session("local_console") is False
+    assert await bus._is_valid_session("") is False
+    assert await bus._is_valid_session(None) is False
+    
+    # Valid authenticated session in SQLite or SecurityManager MUST be accepted
+    auth_sess = await bus.create_authenticated_session(username="real_user")
+    assert await bus._is_valid_session(auth_sess) is True

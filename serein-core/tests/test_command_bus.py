@@ -51,7 +51,8 @@ async def test_destructive_command_requests_confirmation():
             PermissionTier.DESTRUCTIVE,
         }
     )
-    result = await bus.execute("delete_file", {"path": "example.txt"})
+    sess = await bus.create_authenticated_session()
+    result = await bus.execute("delete_file", {"path": "example.txt"}, session_id=sess)
     assert result.status is CommandStatus.CONFIRMATION_REQUIRED
     assert result.confirmation_token
 
@@ -61,10 +62,11 @@ async def test_confirmation_can_be_declined():
     bus = CommandBus(
         allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE}
     )
-    requested = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    requested = await bus.execute("shutdown", session_id=sess)
     assert requested.confirmation_token
 
-    declined = await bus.confirm(requested.confirmation_token, False)
+    declined = await bus.confirm(requested.confirmation_token, False, session_id=sess)
     assert declined.status is CommandStatus.DENIED
 
 
@@ -73,13 +75,14 @@ async def test_confirmation_token_is_single_use():
     bus = CommandBus(
         allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE}
     )
-    requested = await bus.execute("shutdown")
+    sess = await bus.create_authenticated_session()
+    requested = await bus.execute("shutdown", session_id=sess)
     token = requested.confirmation_token
 
-    declined = await bus.confirm(token, False)
+    declined = await bus.confirm(token, False, session_id=sess)
     assert declined.status is CommandStatus.DENIED
 
-    again = await bus.confirm(token, False)
+    again = await bus.confirm(token, False, session_id=sess)
     assert again.status is CommandStatus.FAILED
 
 

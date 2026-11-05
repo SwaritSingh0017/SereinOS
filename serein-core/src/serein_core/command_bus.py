@@ -747,13 +747,13 @@ class CommandBus:
         return obj
 
     async def _is_valid_session(self, session_id: Optional[str]) -> bool:
-        """Validate if session_id corresponds to an active, authenticated UI/daemon session."""
+        """
+        Validate if session_id corresponds to an active, authenticated UI/daemon session.
+        Checks in-memory SecurityManager and SQLite authenticated_sessions table.
+        Does NOT accept conversation_sessions rows or unauthenticated placeholder strings.
+        """
         if not session_id or not str(session_id).strip():
             return False
-
-        # In non-strict mode (testing or local terminal execution), default sessions are valid
-        if not self.require_session and session_id in ("default_session", "system_local", "local_console"):
-            return True
 
         # 1. In-memory SecurityManager active sessions
         try:
@@ -764,18 +764,45 @@ class CommandBus:
         except Exception:
             pass
 
-        # 2. SQLite conversation_sessions
+        # 2. SQLite authenticated_sessions table
         try:
             db = await self._get_db()
-            if db and hasattr(db, "fetch_one"):
-                res = db.fetch_one("SELECT id FROM conversation_sessions WHERE id = ?", (session_id,))
-                row = await self._safe_await(res)
-                if row:
+            if db and hasattr(db, "validate_auth_session"):
+                auth_sess = await self._safe_await(db.validate_auth_session(session_id))
+                if auth_sess:
                     return True
         except Exception:
             pass
 
         return False
+
+    async def create_authenticated_session(
+        self,
+        username: str = "admin",
+        role: str = "admin",
+        expires_in_seconds: float = 86400.0,
+    ) -> str:
+        """Create a verified session in both SecurityManager and SQLite."""
+        from serein_core.auth import security_manager
+        sess = security_manager.create_session(
+            username=username,
+            role=role,
+            age_confirmed=True,
+            expires_in_seconds=expires_in_seconds,
+        )
+        token = sess.session_token
+        try:
+            db = await self._get_db()
+            if db and hasattr(db, "create_auth_session"):
+                await self._safe_await(db.create_auth_session(
+                    session_token=token,
+                    username=username,
+                    role=role,
+                    expires_in_seconds=expires_in_seconds,
+                ))
+        except Exception as e:
+            logger.debug(f"Failed to persist auth session to DB: {e}")
+        return token
     
     def _register_handlers(self) -> None:
         """Register all default command handlers."""
@@ -851,37 +878,51 @@ class CommandBus:
     
     def _create_interface(self) -> ServiceInterface:
         """Create D-Bus service interface."""
-        interface = ServiceInterface("os.serein.CommandBus")
-        
-        @method()
-        async def ExecuteCommand(command: str, params: str, confirmation_token: str) -> str:
-            try:
-                params_dict = json.loads(params) if params else {}
-                result = await self.execute(command, params_dict, confirmation_token)
+        bus_self = self
+
+        class CommandBusInterface(ServiceInterface):
+            def __init__(self):
+                super().__init__("os.serein.CommandBus")
+
+            @method()
+            async def ExecuteCommand(self, command: 's', params: 's', confirmation_token: 's', session_id: 's') -> 's':
+                try:
+                    params_dict = json.loads(params) if params else {}
+                    caller_session = session_id or params_dict.get("_session_id") or params_dict.get("session_id")
+                    result = await bus_self.execute(
+                        command,
+                        params_dict,
+                        confirmation_token=confirmation_token,
+                        session_id=caller_session,
+                    )
+                    return json.dumps({
+                        "success": result.success,
+                        "result": result.result,
+                        "error": result.error,
+                        "permission_tier": result.permission_tier.value if result.permission_tier else "",
+                        "requires_confirmation": result.requires_confirmation,
+                        "confirmation_token": result.confirmation_token,
+                        "challenge_id": result.challenge_id,
+                        "status": result.status.value if result.status else "",
+                    })
+                except Exception as e:
+                    logger.error(f"Command execution error: {e}")
+                    return json.dumps({"success": False, "error": str(e), "status": "failed"})
+
+            @method()
+            async def RequestConfirmation(self, token: 's', approved: 'b', session_id: 's') -> 's':
+                res = await bus_self.confirm(token, approved, session_id=session_id)
                 return json.dumps({
-                    "success": result.success,
-                    "result": result.result,
-                    "error": result.error,
-                    "permission_tier": result.permission_tier.value,
-                    "requires_confirmation": result.requires_confirmation,
+                    "success": res.success,
+                    "status": res.status.value if res.status else "",
+                    "error": res.error,
                 })
-            except Exception as e:
-                logger.error(f"Command execution error: {e}")
-                return json.dumps({"success": False, "error": str(e)})
-        
-        @method()
-        async def RequestConfirmation(token: str, approved: bool) -> str:
-            res = await self.confirm(token, approved)
-            return json.dumps({"success": res.success, "status": res.status.value if res.status else ""})
-        
-        @method()
-        async def ListCommands() -> str:
-            return json.dumps(self.list_commands())
-        
-        interface.add_method(ExecuteCommand)
-        interface.add_method(RequestConfirmation)
-        interface.add_method(ListCommands)
-        return interface
+
+            @method()
+            async def ListCommands(self) -> 's':
+                return json.dumps(bus_self.list_commands())
+
+        return CommandBusInterface()
 
     async def _log_audit(self, command: str, params: Dict, tier: PermissionTier, result_str: str, 
                          error_msg: Optional[str] = None, session_id: Optional[str] = None) -> bool:
@@ -937,10 +978,10 @@ class CommandBus:
                 )
         elif resolved_session is not None:
             if not await self._is_valid_session(resolved_session):
-                await self._log_audit(command, params, handler.tier, "denied", "Invalid authenticated session", session_id=resolved_session)
+                await self._log_audit(command, params, handler.tier, "denied", "Invalid or expired authenticated session", session_id=resolved_session)
                 return CommandResult(
                     success=False,
-                    error="Invalid authenticated session",
+                    error="Invalid or expired authenticated session",
                     permission_tier=handler.tier,
                     status=CommandStatus.DENIED,
                 )
@@ -1023,10 +1064,28 @@ class CommandBus:
             current_hash = _compute_param_hash(params)
 
             if confirmation_token:
+                # Challenge token provided - verify caller supplied an authenticated session
+                if not resolved_session or not str(resolved_session).strip():
+                    await self._log_audit(command, params, handler.tier, "denied", "Missing authenticated session for confirmation challenge", session_id=resolved_session)
+                    return CommandResult(
+                        success=False,
+                        error="Missing authenticated session for confirmation: caller must supply session_id",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+                if not await self._is_valid_session(resolved_session):
+                    await self._log_audit(command, params, handler.tier, "denied", "Invalid or expired authenticated session for confirmation challenge", session_id=resolved_session)
+                    return CommandResult(
+                        success=False,
+                        error="Invalid or expired authenticated session",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+
                 # Challenge token provided - verify challenge details from SQLite
                 challenge = await self._safe_await(db.get_challenge(confirmation_token))
                 if not challenge or not isinstance(challenge, dict):
-                    await self._log_audit(command, params, handler.tier, "denied", "Invalid confirmation challenge token", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", "Invalid confirmation challenge token", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error="Invalid or expired confirmation token",
@@ -1034,7 +1093,7 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
                 if challenge.get("status") != "pending":
-                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge already consumed or cancelled", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge already consumed or cancelled", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error="Confirmation token has already been consumed or cancelled",
@@ -1042,7 +1101,7 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
                 if time.time() > challenge.get("expires_at", 0):
-                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge has expired", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", "Confirmation challenge has expired", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error="Confirmation token has expired",
@@ -1050,7 +1109,7 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
                 if challenge.get("command") != command:
-                    await self._log_audit(command, params, handler.tier, "denied", f"Command mismatch: expected {challenge.get('command')}, got {command}", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", f"Command mismatch: expected {challenge.get('command')}, got {command}", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error=f"Command mismatch for confirmation challenge: expected {challenge.get('command')}, got {command}",
@@ -1058,7 +1117,7 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
                 if challenge.get("param_hash") != current_hash:
-                    await self._log_audit(command, params, handler.tier, "denied", "Parameters altered since confirmation requested", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", "Parameters altered since confirmation requested", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error="Parameters altered since confirmation requested",
@@ -1066,8 +1125,8 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
                 chal_session = challenge.get("session_id")
-                if bound_session and chal_session and bound_session != chal_session:
-                    await self._log_audit(command, params, handler.tier, "denied", f"Session mismatch: expected {chal_session}, got {bound_session}", session_id=bound_session)
+                if chal_session != resolved_session:
+                    await self._log_audit(command, params, handler.tier, "denied", f"Session mismatch: expected {chal_session}, got {resolved_session}", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error="Session mismatch for confirmation challenge",
@@ -1078,7 +1137,7 @@ class CommandBus:
                 # Atomically consume challenge from SQLite
                 consumed = await self._safe_await(db.consume_challenge(
                     challenge_id=confirmation_token,
-                    session_id=bound_session,
+                    session_id=resolved_session,
                     command=command,
                     param_hash=current_hash,
                     now=time.time()
@@ -1087,7 +1146,7 @@ class CommandBus:
                     await self._log_audit(
                         command, params, handler.tier, "denied",
                         "Concurrent confirmation race or challenge already consumed",
-                        session_id=bound_session
+                        session_id=resolved_session
                     )
                     return CommandResult(
                         success=False,
@@ -1100,7 +1159,7 @@ class CommandBus:
                 safety_reval = self.safety_layer.validate_action(safety_action, params)
                 reval_reason = safety_reval.get("reason", "Action not permitted by safety policy")
                 if safety_reval.get("protected_path", False) or "not granted" in reval_reason.lower() or (not safety_reval.get("allowed", False) and not safety_reval.get("requires_approval", False)):
-                    await self._log_audit(command, params, handler.tier, "denied", f"Safety revalidation failed: {reval_reason}", session_id=bound_session)
+                    await self._log_audit(command, params, handler.tier, "denied", f"Safety revalidation failed: {reval_reason}", session_id=resolved_session)
                     return CommandResult(
                         success=False,
                         error=f"Safety revalidation failed: {reval_reason}",
@@ -1108,6 +1167,24 @@ class CommandBus:
                         status=CommandStatus.DENIED,
                     )
             else:
+                # Generating new challenge: Require caller to possess a valid authenticated session
+                if not resolved_session or not str(resolved_session).strip():
+                    await self._log_audit(command, params, handler.tier, "denied", "Missing authenticated session required for confirmation challenge", session_id=resolved_session)
+                    return CommandResult(
+                        success=False,
+                        error="Missing authenticated session required for confirmation challenge: caller must supply session_id",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+                if not await self._is_valid_session(resolved_session):
+                    await self._log_audit(command, params, handler.tier, "denied", "Invalid or expired authenticated session for confirmation challenge", session_id=resolved_session)
+                    return CommandResult(
+                        success=False,
+                        error="Invalid or expired authenticated session",
+                        permission_tier=handler.tier,
+                        status=CommandStatus.DENIED,
+                    )
+
                 # Generate new durable server-tracked challenge in SQLite
                 token = f"ch_{uuid4().hex}"
                 now = time.time()
@@ -1116,7 +1193,7 @@ class CommandBus:
                 
                 persisted = await self._safe_await(db.create_challenge(
                     challenge_id=token,
-                    session_id=bound_session,
+                    session_id=resolved_session,
                     command=command,
                     param_hash=current_hash,
                     params_json=params_json,
@@ -1131,6 +1208,20 @@ class CommandBus:
                         permission_tier=handler.tier,
                         status=CommandStatus.FAILED,
                     )
+                
+                await self._log_audit(
+                    command, params, handler.tier, "confirmation_requested",
+                    f"Generated confirmation challenge {token}",
+                    session_id=resolved_session
+                )
+                return CommandResult(
+                    success=False,
+                    requires_confirmation=True,
+                    confirmation_token=token,
+                    challenge_id=token,
+                    permission_tier=handler.tier,
+                    status=CommandStatus.CONFIRMATION_REQUIRED,
+                )
 
                 try:
                     await event_bus.publish(type("Event", (), {
@@ -1233,7 +1324,23 @@ class CommandBus:
         """
         Handle user confirmation token response with single-use atomic consumption
         via the unified execute() pipeline.
+        Strictly requires caller-supplied authenticated session.
+        Never derives caller identity from stored challenge.
         """
+        if not session_id or not str(session_id).strip():
+            return CommandResult(
+                success=False,
+                error="Missing authenticated session for confirmation: caller must supply session_id",
+                status=CommandStatus.DENIED,
+            )
+
+        if not await self._is_valid_session(session_id):
+            return CommandResult(
+                success=False,
+                error="Invalid or expired authenticated session",
+                status=CommandStatus.DENIED,
+            )
+
         db = await self._get_db()
         if not db:
             return CommandResult(
@@ -1264,8 +1371,7 @@ class CommandBus:
                 status=CommandStatus.FAILED,
             )
 
-        bound_session = session_id or challenge.get("session_id")
-        if session_id and challenge.get("session_id") != session_id:
+        if challenge.get("session_id") != session_id:
             return CommandResult(
                 success=False,
                 error="Session mismatch for confirmation challenge",
@@ -1281,8 +1387,8 @@ class CommandBus:
             params = {}
 
         if not approved:
-            await self._safe_await(db.cancel_challenge(token, bound_session))
-            await self._log_audit(command, params, tier, "declined", "User declined confirmation", session_id=bound_session)
+            await self._safe_await(db.cancel_challenge(token, session_id))
+            await self._log_audit(command, params, tier, "declined", "User declined confirmation", session_id=session_id)
             return CommandResult(
                 success=False,
                 error="User declined confirmation",
@@ -1295,7 +1401,7 @@ class CommandBus:
             command=command,
             params=params,
             confirmation_token=token,
-            session_id=bound_session,
+            session_id=session_id,
         )
     
     async def stop(self) -> None:
