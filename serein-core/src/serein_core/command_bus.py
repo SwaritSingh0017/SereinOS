@@ -730,6 +730,8 @@ class CommandBus:
         self.require_session = require_session
         self._journal_path: Optional[Path] = Path(revocation_journal_path) if revocation_journal_path else None
         self._revocation_lock = asyncio.Lock()
+        self._security_fail_closed: bool = False
+        self._fail_closed_reason: Optional[str] = None
         self._unresolved_revocations: Set[str] = self._read_revocation_journal()
         self._revoked_tokens: Set[str] = self._unresolved_revocations  # Backward-compatible alias
         self._handlers: Dict[str, CommandHandler] = {}
@@ -751,6 +753,28 @@ class CommandBus:
             return await obj
         return obj
 
+    @staticmethod
+    def _compute_token_checksum(token: str) -> str:
+        """Compute 16-character hex SHA-256 integrity checksum for a token."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        """Fsync parent directory on POSIX to guarantee directory entry persistence across power loss."""
+        if os.name == "posix":
+            try:
+                parent_str = str(path.parent)
+                flags = os.O_RDONLY
+                if hasattr(os, "O_DIRECTORY"):
+                    flags |= os.O_DIRECTORY
+                dir_fd = os.open(parent_str, flags)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception as e:
+                logger.debug(f"Directory fsync failed for {path.parent}: {e}")
+
     def _get_revocation_journal_path(self) -> Path:
         """
         Get the durable on-disk path for the revocation recovery journal.
@@ -769,39 +793,161 @@ class CommandBus:
         except Exception:
             return Path.home() / ".local" / "share" / "serein" / "revocations.journal"
 
+    def _mark_dirty_state(self, session_token: str) -> None:
+        """
+        Record an unpersisted revocation token to the dirty recovery file.
+        Used when both journal append and SQLite persistence fail, ensuring
+        that process restart detects the unpersisted revocation and fails closed.
+        """
+        journal_path = self._get_revocation_journal_path()
+        dirty_path = journal_path.with_suffix(".dirty")
+        written = False
+        try:
+            dirty_path.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(str(dirty_path), flags, 0o600)
+            if os.name == "posix":
+                try:
+                    os.fchmod(fd, 0o600)
+                except Exception:
+                    pass
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                record = f"{session_token}|{self._compute_token_checksum(session_token)}\n"
+                f.write(record)
+                f.flush()
+                os.fsync(f.fileno())
+            self._fsync_dir(dirty_path)
+            written = True
+        except Exception as e:
+            logger.critical(f"Failed to record dirty state to '{dirty_path}': {e}")
+
+        if not written:
+            try:
+                fallback_path = Path(tempfile.gettempdir()) / f"serein_revocation_{hashlib.sha256(str(journal_path).encode()).hexdigest()[:12]}.dirty"
+                with open(fallback_path, "a", encoding="utf-8") as f:
+                    f.write(f"{session_token}|{self._compute_token_checksum(session_token)}\n")
+            except Exception:
+                pass
+
     def _read_revocation_journal(self) -> Set[str]:
-        """Read all unresolved revoked tokens from the durable on-disk journal."""
+        """
+        Read and verify all unresolved revoked tokens from the durable on-disk journal.
+        Strict fail-closed invariant:
+        - Distinguishes genuinely absent journal (clean/empty, returns empty set) from
+          an unreadable, corrupted, or malformed journal.
+        - Verifies record integrity and checksums (<token>|<sha256[:16]>).
+        - If reading fails due to PermissionError, OSError, malformed lines, bad checksums,
+          or truncated writes, sets self._security_fail_closed = True and records failure reason.
+        - Checks for dirty recovery marker from unpersisted previous failures.
+        - Never silently swallows read or corruption errors.
+        """
         journal_path = self._get_revocation_journal_path()
         tokens: Set[str] = set()
+
+        # Check for dirty marker from an unpersisted previous failure
+        dirty_path = journal_path.with_suffix(".dirty")
+        fallback_path = Path(tempfile.gettempdir()) / f"serein_revocation_{hashlib.sha256(str(journal_path).encode()).hexdigest()[:12]}.dirty"
+        for dp in [dirty_path, fallback_path]:
+            if dp.exists():
+                try:
+                    with open(dp, "r", encoding="utf-8") as df:
+                        for line in df:
+                            dt = line.strip()
+                            if dt and not dt.startswith("#"):
+                                token_part = dt.split("|")[0].strip()
+                                if token_part:
+                                    tokens.add(token_part)
+                    self._security_fail_closed = True
+                    self._fail_closed_reason = "Revocation journal has unpersisted dirty state from previous failure"
+                    logger.critical(f"Revocation journal dirty state detected at {dp}. Entering fail-closed security state.")
+                except Exception as e:
+                    self._security_fail_closed = True
+                    self._fail_closed_reason = f"Revocation journal dirty marker unreadable: {e}"
+                    logger.critical(f"Revocation journal dirty marker unreadable: {e}. Entering fail-closed security state.")
+
         if not journal_path.exists():
             return tokens
+
         try:
             with open(journal_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    t = line.strip()
-                    if t and not t.startswith("#"):
-                        tokens.add(t)
+                content = f.read()
+        except PermissionError as e:
+            self._security_fail_closed = True
+            self._fail_closed_reason = f"Revocation journal permission denied: {e}"
+            logger.critical(f"Revocation journal unreadable (permission denied): {e}. Entering fail-closed security state.")
+            return tokens
         except Exception as e:
-            logger.error(f"Error reading revocation journal '{journal_path}': {e}")
+            self._security_fail_closed = True
+            self._fail_closed_reason = f"Revocation journal read failure: {e}"
+            logger.critical(f"Revocation journal read failure: {e}. Entering fail-closed security state.")
+            return tokens
+
+        if "\0" in content:
+            self._security_fail_closed = True
+            self._fail_closed_reason = "Revocation journal corruption: contains null bytes"
+            logger.critical("Revocation journal corrupted: contains null bytes. Entering fail-closed security state.")
+            return tokens
+
+        lines = content.splitlines()
+        for line_no, raw_line in enumerate(lines, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split("|")
+            if len(parts) != 2:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Revocation journal malformed at line {line_no}: missing or invalid delimiter"
+                logger.critical(f"Revocation journal malformed at line {line_no}. Entering fail-closed security state.")
+                return tokens
+
+            token, expected_checksum = parts[0].strip(), parts[1].strip()
+            if not token or len(expected_checksum) != 16:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Revocation journal malformed at line {line_no}: invalid token or checksum length"
+                logger.critical(f"Revocation journal malformed at line {line_no}. Entering fail-closed security state.")
+                return tokens
+
+            actual_checksum = self._compute_token_checksum(token)
+            if actual_checksum != expected_checksum:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Revocation journal checksum mismatch at line {line_no}: expected {expected_checksum}, calculated {actual_checksum}"
+                logger.critical(f"Revocation journal checksum mismatch at line {line_no}. Entering fail-closed security state.")
+                return tokens
+
+            tokens.add(token)
+
         return tokens
 
     def _write_revocation_journal(self, token: str) -> bool:
         """
-        Atomically and durably append a revoked token to the on-disk journal.
-        Fsyncs to disk to guarantee survival across process termination.
+        Atomically and durably append a checksummed revoked token to the on-disk journal.
+        Guarantees 0o600 permissions from inception and fsyncs file and directory to
+        survive crashes and power loss.
         """
         journal_path = self._get_revocation_journal_path()
         try:
             journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(journal_path, "a", encoding="utf-8") as f:
-                f.write(f"{token}\n")
-                f.flush()
-                os.fsync(f.fileno())
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+
+            # Open with 0o600 permissions from creation time
+            fd = os.open(str(journal_path), flags, 0o600)
             if os.name == "posix":
                 try:
-                    os.chmod(journal_path, 0o600)
+                    os.fchmod(fd, 0o600)
                 except Exception:
                     pass
+            record = f"{token}|{self._compute_token_checksum(token)}\n"
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(record)
+                f.flush()
+                os.fsync(f.fileno())
+
+            self._fsync_dir(journal_path)
             return True
         except Exception as e:
             logger.error(f"Failed to durably write to revocation journal '{journal_path}': {e}")
@@ -809,7 +955,8 @@ class CommandBus:
 
     def _prune_revocation_journal(self, tokens_to_remove: Set[str]) -> bool:
         """
-        Prune reconciled tokens from the on-disk journal using atomic replace.
+        Prune reconciled tokens from the on-disk journal using crash-safe atomic replace.
+        Preserves 0o600 permissions and fsyncs parent directory.
         """
         if not tokens_to_remove:
             return True
@@ -817,20 +964,35 @@ class CommandBus:
         if not journal_path.exists():
             return True
         try:
-            remaining = set()
+            remaining: Set[str] = set()
             with open(journal_path, "r", encoding="utf-8") as f:
                 for line in f:
                     t = line.strip()
-                    if t and not t.startswith("#") and t not in tokens_to_remove:
-                        remaining.add(t)
+                    if t and not t.startswith("#"):
+                        token_part = t.split("|")[0].strip()
+                        if token_part and token_part not in tokens_to_remove:
+                            remaining.add(token_part)
 
             tmp_path = journal_path.with_suffix(".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                for t in remaining:
-                    f.write(f"{t}\n")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            fd = os.open(str(tmp_path), flags, 0o600)
+            if os.name == "posix":
+                try:
+                    os.fchmod(fd, 0o600)
+                except Exception:
+                    pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("# SEREIN_REVOCATION_JOURNAL_V1\n")
+                for token in sorted(remaining):
+                    f.write(f"{token}|{self._compute_token_checksum(token)}\n")
                 f.flush()
                 os.fsync(f.fileno())
+
+            self._fsync_dir(tmp_path)
             os.replace(tmp_path, journal_path)
+            self._fsync_dir(journal_path)
             return True
         except Exception as e:
             logger.error(f"Failed to prune revocation journal '{journal_path}': {e}")
@@ -854,6 +1016,7 @@ class CommandBus:
         Reconcile pending journal revocations with the primary SQLite database.
         Updates authenticated_sessions SET revoked = 1 for all pending tokens.
         Prunes confirmed tokens from the journal.
+        Clears fail-closed state if persistent storage is consistent, healthy, and verified.
         Returns number of successfully reconciled sessions.
         """
         db = await self._get_db()
@@ -862,7 +1025,7 @@ class CommandBus:
 
         async with self._revocation_lock:
             unresolved = set(self._unresolved_revocations) | self._read_revocation_journal()
-            if not unresolved:
+            if not unresolved and not self._security_fail_closed:
                 return 0
 
             reconciled = set()
@@ -878,12 +1041,153 @@ class CommandBus:
                 self._unresolved_revocations -= reconciled
                 self._prune_revocation_journal(reconciled)
 
+            # Check if all pending revocations are now reconciled and journal is healthy
+            journal_path = self._get_revocation_journal_path()
+            dirty_path = journal_path.with_suffix(".dirty")
+            fallback_dirty = Path(tempfile.gettempdir()) / f"serein_revocation_{hashlib.sha256(str(journal_path).encode()).hexdigest()[:12]}.dirty"
+
+            if not self._unresolved_revocations:
+                for dp in [dirty_path, fallback_dirty]:
+                    if dp.exists():
+                        try:
+                            dp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                if self._security_fail_closed and (
+                    "dirty" in (self._fail_closed_reason or "").lower()
+                    or "could not be durably recorded" in (self._fail_closed_reason or "").lower()
+                ):
+                    self._security_fail_closed = False
+                    self._fail_closed_reason = None
+                    logger.info("Revocation journal successfully reconciled with SQLite. Fail-closed security state cleared.")
+
             return len(reconciled)
+
+    async def recover_journal(self, force_rebuild: bool = False) -> bool:
+        """
+        Controlled administrative recovery mechanism to restore journal integrity.
+        - If force_rebuild=False:
+            Re-verifies journal on disk (e.g. after file permissions are corrected by admin).
+            If valid and SQLite is reachable, reconciles and clears fail-closed state.
+        - If force_rebuild=True:
+            Archives any corrupted journal or dirty file to timestamped backup.
+            Re-initializes a clean, verified journal with 0o600 permissions.
+            Reconciles salvaged unrevoked tokens with SQLite.
+            Clears fail-closed state only when persistent storage is verified consistent.
+        Returns True if journal integrity is successfully recovered and fail-closed is cleared.
+        """
+        async with self._revocation_lock:
+            journal_path = self._get_revocation_journal_path()
+            dirty_path = journal_path.with_suffix(".dirty")
+            fallback_dirty = Path(tempfile.gettempdir()) / f"serein_revocation_{hashlib.sha256(str(journal_path).encode()).hexdigest()[:12]}.dirty"
+
+            if not force_rebuild:
+                self._security_fail_closed = False
+                self._fail_closed_reason = None
+                tokens = self._read_revocation_journal()
+                if self._security_fail_closed:
+                    return False
+                self._unresolved_revocations = tokens
+                db = await self._get_db()
+                if db is None:
+                    self._security_fail_closed = True
+                    self._fail_closed_reason = "Administrative recovery failed: SQLite database unavailable"
+                    return False
+                await self.reconcile_revocations()
+                return not self._security_fail_closed
+
+            salvaged_tokens: Set[str] = set(self._unresolved_revocations)
+
+            if journal_path.exists():
+                try:
+                    with open(journal_path, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            t = line.strip()
+                            if t and not t.startswith("#"):
+                                token_part = t.split("|")[0].strip()
+                                if token_part and len(token_part) > 10:
+                                    salvaged_tokens.add(token_part)
+                except Exception:
+                    pass
+
+                archive_name = f"{journal_path.name}.corrupt.{int(time.time())}"
+                archive_path = journal_path.parent / archive_name
+                try:
+                    os.replace(journal_path, archive_path)
+                    self._fsync_dir(journal_path)
+                except Exception as e:
+                    logger.error(f"Failed to archive corrupted journal to {archive_path}: {e}")
+
+            for dp in [dirty_path, fallback_dirty]:
+                if dp.exists():
+                    try:
+                        with open(dp, "r", encoding="utf-8", errors="replace") as f:
+                            for line in f:
+                                t = line.strip()
+                                if t and not t.startswith("#"):
+                                    token_part = t.split("|")[0].strip()
+                                    if token_part:
+                                        salvaged_tokens.add(token_part)
+                        dp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            try:
+                journal_path.parent.mkdir(parents=True, exist_ok=True)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                if hasattr(os, "O_CLOEXEC"):
+                    flags |= os.O_CLOEXEC
+                fd = os.open(str(journal_path), flags, 0o600)
+                if os.name == "posix":
+                    try:
+                        os.fchmod(fd, 0o600)
+                    except Exception:
+                        pass
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write("# SEREIN_REVOCATION_JOURNAL_V1\n")
+                    for token in sorted(salvaged_tokens):
+                        f.write(f"{token}|{self._compute_token_checksum(token)}\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                self._fsync_dir(journal_path)
+            except Exception as e:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Administrative recovery failed to create clean journal: {e}"
+                return False
+
+            self._unresolved_revocations = set(salvaged_tokens)
+            self._security_fail_closed = False
+            self._fail_closed_reason = None
+
+            db = await self._get_db()
+            if db is None:
+                self._security_fail_closed = True
+                self._fail_closed_reason = "Administrative recovery failed: SQLite database unavailable for reconciliation"
+                return False
+
+            try:
+                reconciled = set()
+                for token in list(salvaged_tokens):
+                    if hasattr(db, "revoke_auth_session"):
+                        success = await self._safe_await(db.revoke_auth_session(token))
+                        if success:
+                            reconciled.add(token)
+                self._unresolved_revocations -= reconciled
+                if reconciled:
+                    self._prune_revocation_journal(reconciled)
+            except Exception as e:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Administrative recovery reconciliation failed: {e}"
+                return False
+
+            logger.info("Revocation journal successfully recovered and verified. Fail-closed security state cleared.")
+            return True
 
     async def _is_valid_session(self, session_id: Optional[str]) -> bool:
         """
         Validate if session_id corresponds to an active, authenticated UI/daemon session.
         Strict fail-closed invariant:
+        - Rejects authentication immediately if Command Bus is in fail-closed lockdown.
         - Rejects authentication if token is in durable revocation journal or unresolved set.
         - Rejects authentication whenever SQLite validation fails or database is unavailable.
         - Never falls back to accepting an in-memory session.
@@ -891,6 +1195,10 @@ class CommandBus:
         - Rejects revoked tokens, expired tokens, or unpersisted placeholders.
         """
         if not session_id or not str(session_id).strip():
+            return False
+
+        if self._security_fail_closed:
+            logger.warning(f"Session validation denied: Command Bus in fail-closed state ({self._fail_closed_reason})")
             return False
 
         # Invariant 1: Check durable journal and unresolved revocation set
@@ -958,9 +1266,13 @@ class CommandBus:
     ) -> Optional[str]:
         """
         Authenticate credentials against canonical SecurityManager and persist to SQLite.
-        Fails closed: if persistence fails or database is unavailable, in-memory session
-        is immediately invalidated and None is returned.
+        Fails closed: if Command Bus is in fail-closed state, persistence fails, or
+        database is unavailable, in-memory session is immediately invalidated and None is returned.
         """
+        if self._security_fail_closed:
+            logger.warning(f"Authentication rejected: Command Bus in fail-closed state ({self._fail_closed_reason})")
+            return None
+
         from serein_core.auth import security_manager
         session = security_manager.authenticate(username, password, expires_in_seconds=expires_in_seconds)
         if not session:
@@ -1002,8 +1314,9 @@ class CommandBus:
         Strict fail-closed invariant:
         - In-memory state is immediately invalidated.
         - Session token is durably recorded in on-disk revocation journal with fsync.
-        - If durable recording cannot be guaranteed, fails closed for affected session.
         - Attempts to update SQLite persistence immediately.
+        - If BOTH journal persistence AND SQLite persistence fail, enters fail-closed lockdown,
+          records dirty recovery state, and returns False.
         - Returns True ONLY when persistent SQLite revocation is confirmed.
         - If persistent SQLite revocation fails (database unavailable, database error, or 0 rows),
           returns False, while ensuring the session remains durably barred from authorizing operations
@@ -1028,22 +1341,30 @@ class CommandBus:
 
             # 4. Attempt persistent SQLite update
             db = await self._get_db()
-            if db is None or not hasattr(db, "revoke_auth_session"):
-                logger.error(f"Persistent SQLite revocation failed for '{session_token}': database unavailable")
+            sqlite_persisted = False
+            if db is not None and hasattr(db, "revoke_auth_session"):
+                try:
+                    sqlite_persisted = bool(await self._safe_await(db.revoke_auth_session(session_token)))
+                except Exception as e:
+                    logger.error(f"Persistent SQLite revocation exception for '{session_token}': {e}")
+                    sqlite_persisted = False
+
+            # Invariant: If BOTH journal persistence and SQLite persistence fail:
+            if not journal_persisted and not sqlite_persisted:
+                self._security_fail_closed = True
+                self._fail_closed_reason = f"Revocation of session '{session_token}' could not be durably recorded in journal or database"
+                logger.critical(f"CRITICAL: Revocation persistence failure: {self._fail_closed_reason}. Entering fail-closed security lockdown.")
+                self._mark_dirty_state(session_token)
                 return False
 
-            try:
-                sqlite_persisted = await self._safe_await(db.revoke_auth_session(session_token))
-                if not sqlite_persisted:
-                    logger.error(f"Persistent SQLite revocation failed for '{session_token}': storage returned False")
-                    return False
-
-                # 5. Successfully confirmed in SQLite: prune from journal
+            if sqlite_persisted:
+                # Successfully confirmed in SQLite: prune from journal
                 self._unresolved_revocations.discard(session_token)
                 self._prune_revocation_journal({session_token})
                 return True
-            except Exception as e:
-                logger.error(f"Persistent SQLite revocation exception for '{session_token}': {e}")
+            else:
+                # Journal persisted, but SQLite failed.
+                # Durably recorded in journal for restart safety, but return False because SQLite was unconfirmed.
                 return False
     
     def _register_handlers(self) -> None:
@@ -1164,6 +1485,17 @@ class CommandBus:
             async def ListCommands(self) -> 's':
                 return json.dumps(bus_self.list_commands())
 
+            @method()
+            async def RecoverJournal(self, force_rebuild: 'b', session_id: 's') -> 's':
+                if not session_id or not await bus_self._is_valid_session(session_id):
+                    return json.dumps({"success": False, "error": "Unauthorized: valid session required"})
+                recovered = await bus_self.recover_journal(force_rebuild=force_rebuild)
+                return json.dumps({
+                    "success": recovered,
+                    "fail_closed": bus_self._security_fail_closed,
+                    "reason": bus_self._fail_closed_reason,
+                })
+
         return CommandBusInterface()
 
     async def _log_audit(self, command: str, params: Dict, tier: PermissionTier, result_str: str, 
@@ -1207,6 +1539,22 @@ class CommandBus:
         
         handler = self._handlers[command]
         resolved_session = session_id or params.get("_session_id") or params.get("session_id")
+
+        # 0. Fail-Closed Lockdown Enforcement
+        if self._security_fail_closed:
+            # Refuse authenticated operations, operations requiring a session, or destructive/sensitive operations
+            if self.require_session or resolved_session is not None or handler.tier in (PermissionTier.DESTRUCTIVE, PermissionTier.SENSITIVE):
+                await self._log_audit(
+                    command, params, handler.tier, "denied",
+                    f"Command Bus is in fail-closed security lockdown: {self._fail_closed_reason}",
+                    session_id=resolved_session
+                )
+                return CommandResult(
+                    success=False,
+                    error=f"Command Bus is in fail-closed security lockdown: {self._fail_closed_reason}",
+                    permission_tier=handler.tier,
+                    status=CommandStatus.DENIED,
+                )
 
         # 1. Authenticated Session Verification
         if self.require_session:
@@ -1573,6 +1921,13 @@ class CommandBus:
             return CommandResult(
                 success=False,
                 error="Missing authenticated session for confirmation: caller must supply session_id",
+                status=CommandStatus.DENIED,
+            )
+
+        if self._security_fail_closed:
+            return CommandResult(
+                success=False,
+                error=f"Command Bus is in fail-closed security lockdown: {self._fail_closed_reason}",
                 status=CommandStatus.DENIED,
             )
 

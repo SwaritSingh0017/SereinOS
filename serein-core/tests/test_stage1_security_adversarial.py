@@ -1629,3 +1629,391 @@ async def test_successful_persistent_revocation_across_restart(tmp_path):
     assert exec_res.status is CommandStatus.DENIED
 
     await db2.close()
+
+
+# =========================================================================
+# 24. Durable Revocation Journal Integrity & Fail-Closed Invariants
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_journal_exists_but_unreadable_triggers_fail_closed(tmp_path):
+    """
+    If the journal file exists but is unreadable (e.g. PermissionError),
+    CommandBus must NOT swallow the error or assume an empty journal.
+    It must trigger fail-closed state and reject all authenticated operations.
+    """
+    journal_file = tmp_path / "unreadable.journal"
+    journal_file.write_text("# SEREIN_REVOCATION_JOURNAL_V1\n", encoding="utf-8")
+
+    real_open = open
+
+    def fake_open(file, *args, **kwargs):
+        if str(file) == str(journal_file):
+            raise PermissionError("Access denied by OS security policy")
+        return real_open(file, *args, **kwargs)
+
+    with patch("builtins.open", side_effect=fake_open):
+        bus = CommandBus(
+            allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+            require_session=True,
+            revocation_journal_path=journal_file,
+        )
+
+    # Invariant 1: Bus enters fail-closed state
+    assert bus._security_fail_closed is True
+    assert "permission" in (bus._fail_closed_reason or "").lower()
+
+    # Invariant 2: Session validation fails closed
+    assert await bus._is_valid_session("any_token") is False
+
+    # Invariant 3: Authenticated operations are denied
+    res = await bus.execute("list_running_apps", session_id="any_token")
+    assert res.status is CommandStatus.DENIED
+    assert "fail-closed" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_journal_corrupted_or_malformed_triggers_fail_closed(tmp_path):
+    """
+    If the journal file exists but contains corrupted, malformed, or checksum-mismatched
+    entries, CommandBus must trigger fail-closed security state.
+    """
+    # 1. Missing delimiter / malformed line
+    j1 = tmp_path / "corrupt1.journal"
+    j1.write_text("malformed_entry_without_delimiter\n", encoding="utf-8")
+    bus1 = CommandBus(revocation_journal_path=j1, require_session=True)
+    assert bus1._security_fail_closed is True
+    assert "malformed" in (bus1._fail_closed_reason or "").lower()
+    res1 = await bus1.execute("list_running_apps", session_id="token1")
+    assert res1.status is CommandStatus.DENIED
+
+    # 2. Checksum mismatch
+    j2 = tmp_path / "corrupt2.journal"
+    j2.write_text("valid_token|0123456789abcdef\n", encoding="utf-8")
+    bus2 = CommandBus(revocation_journal_path=j2, require_session=True)
+    assert bus2._security_fail_closed is True
+    assert "checksum mismatch" in (bus2._fail_closed_reason or "").lower()
+    res2 = await bus2.execute("list_running_apps", session_id="token2")
+    assert res2.status is CommandStatus.DENIED
+
+    # 3. Contains null bytes
+    j3 = tmp_path / "corrupt3.journal"
+    j3.write_bytes(b"some_token|12345678\x00\x00\x00")
+    bus3 = CommandBus(revocation_journal_path=j3, require_session=True)
+    assert bus3._security_fail_closed is True
+    assert "null bytes" in (bus3._fail_closed_reason or "").lower()
+    res3 = await bus3.execute("list_running_apps", session_id="token3")
+    assert res3.status is CommandStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_journal_write_failure_with_sqlite_unavailable_triggers_fail_closed(tmp_path):
+    """
+    If both journal append AND SQLite persistence fail during revocation,
+    the Command Bus must enter fail-closed lockdown and refuse authenticated operations.
+    """
+    db_file = tmp_path / "both_fail.db"
+    journal_file = tmp_path / "both_fail.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+        revocation_journal_path=journal_file,
+    )
+    user = f"both_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+    assert await bus._is_valid_session(token) is True
+
+    # Simulate simultaneous journal write failure and SQLite failure
+    with patch.object(bus, "_write_revocation_journal", return_value=False), \
+         patch.object(db, "revoke_auth_session", AsyncMock(return_value=False)):
+        revoked = await bus.revoke_session(token)
+        assert revoked is False
+
+    # Invariant: Bus entered fail-closed lockdown
+    assert bus._security_fail_closed is True
+    assert "could not be durably recorded" in (bus._fail_closed_reason or "").lower()
+
+    # Operations fail closed
+    assert await bus._is_valid_session(token) is False
+    res = await bus.execute("list_running_apps", session_id=token)
+    assert res.status is CommandStatus.DENIED
+    assert "fail-closed" in res.error.lower()
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_process_restart_after_both_persistence_fail_fails_closed(tmp_path):
+    """
+    If both journal write and SQLite persistence failed earlier,
+    a process restart must still refuse to treat the session as valid
+    and maintain fail-closed protection.
+    """
+    from serein_core.auth import security_manager
+    db_file = tmp_path / "both_restart.db"
+    journal_file = tmp_path / "both_restart.db.revocations"
+    db1 = Database(path=db_file)
+    await db1.connect()
+
+    bus1 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db1,
+        revocation_journal_path=journal_file,
+    )
+    user = f"both_rst_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus1, username=user)
+    assert await bus1._is_valid_session(token) is True
+
+    # Both fail during revocation
+    with patch.object(bus1, "_write_revocation_journal", return_value=False), \
+         patch.object(db1, "revoke_auth_session", AsyncMock(return_value=False)):
+        assert await bus1.revoke_session(token) is False
+
+    # Terminate process 1 completely
+    await db1.close()
+    security_manager._sessions.clear()
+
+    # Process 2 restart
+    db2 = Database(path=db_file)
+    await db2.connect()
+    bus2 = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db2,
+        revocation_journal_path=journal_file,
+    )
+
+    # Invariant: bus2 recognizes dirty recovery state and fails closed
+    assert bus2._security_fail_closed is True
+    assert await bus2._is_valid_session(token) is False
+
+    res = await bus2.execute("list_running_apps", session_id=token)
+    assert res.status is CommandStatus.DENIED
+    assert "fail-closed" in res.error.lower()
+
+    await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_journal_append_truncated_or_incomplete_triggers_fail_closed(tmp_path):
+    """
+    A simulated power loss or crash causing a truncated / torn line in the journal
+    must be detected on subsequent startup and trigger fail-closed state.
+    """
+    journal_file = tmp_path / "truncated.journal"
+    # Write a torn line (truncated checksum)
+    journal_file.write_text("serein_token_valid_prefix|torn_c\n", encoding="utf-8")
+
+    bus = CommandBus(revocation_journal_path=journal_file, require_session=True)
+    assert bus._security_fail_closed is True
+    assert "malformed" in (bus._fail_closed_reason or "").lower()
+
+    res = await bus.execute("list_running_apps", session_id="serein_token_valid_prefix")
+    assert res.status is CommandStatus.DENIED
+
+
+@pytest.mark.asyncio
+async def test_crash_during_journal_prune_atomic_replacement_keeps_journal_intact(tmp_path):
+    """
+    If a crash occurs during journal pruning (before os.replace completes),
+    the original journal file must remain intact and valid with all existing tokens.
+    """
+    journal_file = tmp_path / "prune_crash.journal"
+    bus = CommandBus(revocation_journal_path=journal_file)
+
+    tok1 = "token_one_to_keep"
+    tok2 = "token_two_to_prune"
+    assert bus._write_revocation_journal(tok1) is True
+    assert bus._write_revocation_journal(tok2) is True
+
+    # Verify both present
+    initial_tokens = bus._read_revocation_journal()
+    assert tok1 in initial_tokens
+    assert tok2 in initial_tokens
+
+    # Simulate crash right before atomic replace
+    with patch("os.replace", side_effect=OSError("Simulated crash right before replace")):
+        pruned = bus._prune_revocation_journal({tok2})
+        assert pruned is False
+
+    # Original journal must remain completely intact
+    after_tokens = bus._read_revocation_journal()
+    assert tok1 in after_tokens
+    assert tok2 in after_tokens
+
+
+@pytest.mark.asyncio
+async def test_concurrent_revocation_and_reconciliation_race_safety(tmp_path):
+    """
+    Concurrent revocations and reconciliations running in parallel must not corrupt
+    the journal file, lose tokens, or produce race errors.
+    """
+    db_file = tmp_path / "concurrent_race.db"
+    journal_file = tmp_path / "concurrent_race.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(database=db, revocation_journal_path=journal_file)
+    tokens = []
+    for i in range(10):
+        t = await get_test_authenticated_session(bus, username=f"race_user_{i}_{int(time.time())}")
+        tokens.append(t)
+
+    async def worker_revoke(tok):
+        return await bus.revoke_session(tok)
+
+    async def worker_reconcile():
+        return await bus.reconcile_revocations()
+
+    # Mix concurrent revokes and reconciles
+    tasks = [worker_revoke(t) for t in tokens] + [worker_reconcile() for _ in range(5)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results:
+        assert not isinstance(r, Exception), f"Unexpected exception in concurrent task: {r}"
+
+    # Verify all tokens are revoked in SQLite
+    for t in tokens:
+        assert await bus._is_valid_session(t) is False
+        row = await db.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (t,))
+        assert row is not None and row["revoked"] == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_storage_becomes_available_clears_fail_closed(tmp_path):
+    """
+    When the database recovers after a double-failure, reconcile_revocations()
+    syncs all unpersisted entries into SQLite, removes dirty markers, and
+    clears the fail-closed security state.
+    """
+    db_file = tmp_path / "recover_storage.db"
+    journal_file = tmp_path / "recover_storage.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+        revocation_journal_path=journal_file,
+    )
+    user = f"rec_storage_user_{int(time.time())}"
+    token = await get_test_authenticated_session(bus, username=user)
+
+    # Induce double-failure
+    with patch.object(bus, "_write_revocation_journal", return_value=False), \
+         patch.object(db, "revoke_auth_session", AsyncMock(return_value=False)):
+        assert await bus.revoke_session(token) is False
+
+    assert bus._security_fail_closed is True
+
+    # Storage is now fully available again
+    reconciled = await bus.reconcile_revocations()
+    assert reconciled == 1
+
+    # Invariant: fail-closed is safely cleared and session is revoked in SQLite
+    assert bus._security_fail_closed is False
+    assert bus._fail_closed_reason is None
+
+    row = await db.fetch_one("SELECT revoked FROM authenticated_sessions WHERE session_token = ?", (token,))
+    assert row["revoked"] == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_commands_allowed_while_authenticated_denied_during_fail_closed(tmp_path):
+    """
+    During fail-closed lockdown:
+    - Authenticated commands are strictly DENIED.
+    - Sensitive/destructive commands are strictly DENIED.
+    - Unauthenticated read-only commands (when session is not required) remain operational.
+    """
+    journal_file = tmp_path / "fail_closed_routing.journal"
+    journal_file.write_text("corrupted_line\n", encoding="utf-8")
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE, PermissionTier.SENSITIVE},
+        require_session=False,
+        revocation_journal_path=journal_file,
+    )
+    assert bus._security_fail_closed is True
+
+    # 1. Unauthenticated read-only command executes
+    read_res = await bus.execute("list_running_apps")
+    assert read_res.status is CommandStatus.SUCCESS
+
+    # 2. Authenticated command is DENIED
+    auth_res = await bus.execute("list_running_apps", session_id="any_session_token")
+    assert auth_res.status is CommandStatus.DENIED
+    assert "fail-closed" in auth_res.error.lower()
+
+    # 3. Sensitive / destructive commands are DENIED even if unauthenticated
+    destr_res = await bus.execute("delete_file", {"path": "/tmp/serein/test.txt"})
+    assert destr_res.status is CommandStatus.DENIED
+    assert "fail-closed" in destr_res.error.lower()
+
+    sens_res = await bus.execute("network_request", {"url": "https://example.com"})
+    assert sens_res.status is CommandStatus.DENIED
+    assert "fail-closed" in sens_res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_administrative_recovery_procedure_restores_operation(tmp_path):
+    """
+    Administrative recovery (recover_journal(force_rebuild=True)):
+    - Archives corrupted journal
+    - Re-initializes clean verified journal with 0o600 permissions
+    - Reconciles state with SQLite
+    - Clears fail-closed security state and restores normal operation
+    """
+    db_file = tmp_path / "admin_rec.db"
+    journal_file = tmp_path / "admin_rec.db.revocations"
+    db = Database(path=db_file)
+    await db.connect()
+
+    # Corrupt journal deliberately
+    journal_file.write_text("GARBAGE_TORN_ENTRY_123\n", encoding="utf-8")
+
+    bus = CommandBus(
+        allowed_tiers={PermissionTier.READ_ONLY, PermissionTier.DESTRUCTIVE},
+        require_session=True,
+        database=db,
+        revocation_journal_path=journal_file,
+    )
+    assert bus._security_fail_closed is True
+
+    # Authenticated operations denied while fail-closed
+    user = f"admin_rec_user_{int(time.time())}"
+    token = await bus.authenticate(user, "ValidSecurePass123!")
+    # Token cannot be authenticated while fail-closed
+    assert token is None
+    res = await bus.execute("list_running_apps", session_id="attempt_token")
+    assert res.status is CommandStatus.DENIED
+
+    # Perform administrative recovery
+    recovered = await bus.recover_journal(force_rebuild=True)
+    assert recovered is True
+    assert bus._security_fail_closed is False
+    assert bus._fail_closed_reason is None
+
+    # Clean journal now exists and has proper header
+    assert journal_file.exists()
+    assert "# SEREIN_REVOCATION_JOURNAL_V1" in journal_file.read_text(encoding="utf-8")
+
+    # Now authentication and operations succeed
+    valid_token = await get_test_authenticated_session(bus, username=user)
+    assert valid_token is not None
+    assert await bus._is_valid_session(valid_token) is True
+
+    exec_res = await bus.execute("list_running_apps", session_id=valid_token)
+    assert exec_res.status is CommandStatus.SUCCESS
+
+    await db.close()

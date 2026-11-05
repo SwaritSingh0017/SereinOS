@@ -637,3 +637,66 @@ All 12 vulnerabilities identified in Section 4 were independently reproduced and
 | `serein-compositor/*` | **KEEP** | C-based Wayland compositor. |
 | `serein-avatar/*` | **KEEP** | Avatar assets and viseme controllers. |
 | `deploy/systemd/*` | **KEEP** | Systemd unit configurations. |
+
+
+---
+
+## 10. Revocation Journal Fail-Closed Remediation & Empirical Verification
+
+### Overview of Findings & Root Cause Analysis
+
+Following the initial implementation of the durable write-ahead revocation journal (`commit 6fa335d`), a second engineering review identified two critical fail-open vulnerabilities:
+
+1. **Silent Swallowing of Journal Read Exceptions:**
+   - *Vulnerability:* In `command_bus.py:_read_revocation_journal()`, any `PermissionError`, I/O error, or data corruption exception was caught in a generic `except Exception` block that logged an error and silently returned an empty set (`tokens = set()`).
+   - *Impact:* An unreadable journal (e.g. strict OS file permissions) or a corrupted journal file was treated as an empty journal, causing previously revoked tokens to be accepted as active sessions if SQLite was temporarily out of sync.
+2. **Dual-Failure In-Memory Fallback across Restart:**
+   - *Vulnerability:* In `command_bus.py:revoke_session()`, if writing to the on-disk journal failed, execution proceeded to SQLite. If SQLite was also unavailable, the revocation was recorded only in the volatile in-memory set `_unresolved_revocations`.
+   - *Impact:* Upon process crash or daemon restart, the in-memory set was lost. When SQLite was restored or if SQLite still contained `revoked=0`, the revoked token could become valid again.
+
+### Implemented Architectural Remediations
+
+To enforce strict fail-closed security invariants across power loss and process restart, the following mechanisms were implemented in [`serein_core/command_bus.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/src/serein_core/command_bus.py):
+
+1. **Checksummed Record Format & Integrity Verification:**
+   - Each journal record is formatted with a truncated SHA-256 integrity checksum: `<token>|<sha256(token)[:16]>\n`.
+   - On read, syntax, delimiters, field lengths, null bytes (`\0`), and checksums are verified.
+   - Any read failure, permission denial, truncation, or corruption sets `self._security_fail_closed = True` and locks the Command Bus into fail-closed state.
+2. **Crash-Durable File Creation (`0o600` Inception) & POSIX Directory Fsync:**
+   - Files are opened using `os.open` with `0o600` permissions from inception (`O_WRONLY | O_CREAT | O_APPEND`), eliminating world-readable permission windows.
+   - Fsync is executed on both the file descriptor and the parent directory (`_fsync_dir` on POSIX) after every write and atomic prune (`os.replace`).
+3. **Fail-Closed Dual-Failure Lockdown & Dirty State Recovery:**
+   - If both journal write and SQLite persistence fail during `revoke_session()`, the Command Bus enters fail-closed lockdown (`self._security_fail_closed = True`) and records an emergency dirty recovery marker via `_mark_dirty_state()`.
+   - On process restart, `_read_revocation_journal()` detects the dirty recovery state, adds the affected session to `_unresolved_revocations`, and triggers fail-closed security lockdown until reconciled.
+4. **Controlled Administrative Recovery Path:**
+   - Added `recover_journal(force_rebuild: bool = False)`:
+     - `force_rebuild=False`: Re-verifies file accessibility on disk (e.g. after administrator corrects file permissions), verifies SQLite connectivity, and reconciles pending entries.
+     - `force_rebuild=True`: Archives corrupted journal files to timestamped backup files, salvages all readable tokens, creates a fresh verified journal with standard headers, reconciles salvaged tokens into SQLite, and safely clears fail-closed lockdown only when persistent storage is verified consistent.
+   - Exposed `RecoverJournal` via D-Bus IPC interface with authenticated session validation.
+
+### Empirical Test Execution Results
+
+Ten new adversarial tests were implemented in [`serein-core/tests/test_stage1_security_adversarial.py`](file:///d:/PLACEMENT/PROJECTS/SereinOS/serein-core/tests/test_stage1_security_adversarial.py) (Section 24):
+
+| Test Name | Target Invariant | Result |
+| :--- | :--- | :---: |
+| `test_journal_exists_but_unreadable_triggers_fail_closed` | `PermissionError` on journal triggers `_security_fail_closed` | **PASSED** |
+| `test_journal_corrupted_or_malformed_triggers_fail_closed` | Malformed lines, checksum mismatches, and null bytes trigger fail-closed | **PASSED** |
+| `test_journal_write_failure_with_sqlite_unavailable_triggers_fail_closed` | Dual storage failure during revocation locks Command Bus into fail-closed | **PASSED** |
+| `test_process_restart_after_both_persistence_fail_fails_closed` | Dirty recovery state preserves revocation across process restart | **PASSED** |
+| `test_journal_append_truncated_or_incomplete_triggers_fail_closed` | Torn line / incomplete append triggers fail-closed on restart | **PASSED** |
+| `test_crash_during_journal_prune_atomic_replacement_keeps_journal_intact` | Exception before `os.replace` leaves original journal intact | **PASSED** |
+| `test_concurrent_revocation_and_reconciliation_race_safety` | Parallel revoke and reconcile workers avoid race conditions and deadlocks | **PASSED** |
+| `test_recovery_after_storage_becomes_available_clears_fail_closed` | Reconciling with restored SQLite clears fail-closed state | **PASSED** |
+| `test_unauthenticated_commands_allowed_while_authenticated_denied_during_fail_closed` | Unauthenticated read-only commands operational; authenticated / sensitive denied | **PASSED** |
+| `test_administrative_recovery_procedure_restores_operation` | Explicit `recover_journal(force_rebuild=True)` archives corruption and restores system | **PASSED** |
+
+**Full Suite Execution Summary:**
+- `serein-core/tests/test_stage1_security_adversarial.py`: **62 passed**, 1 skipped (Windows unprivileged symlink creation).
+- `serein-core/tests/test_command_bus.py`: **10 passed**, 0 failed.
+- `serein-core/tests/test_security_audit.py`: **7 passed**, 0 failed.
+- `tests/test_m4_empirical_adversarial_recheck.py`: **36 passed**, 0 failed.
+
+### Documented Limitations & Review Hold
+1. **Windows Developer Environment Privilege Limits:** `test_symlink_escape_rejected` is skipped when running on unprivileged Windows developer environments without `SeCreateSymbolicLinkPrivilege`. This test executes and passes on POSIX/Linux runners.
+2. **Review Hold:** All changes remain committed exclusively on branch `architecture/rebuild-foundation`. Stage 2 development remains halted pending final independent review.
